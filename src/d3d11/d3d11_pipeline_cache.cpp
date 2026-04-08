@@ -113,6 +113,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       return arguments_info_buffer + reflection_.NumConstantBuffers;
     };
     virtual CompiledShader *get_shader(ShaderVariant variant) {
+    auto start = std::chrono::high_resolution_clock::now();
       auto c = variants.insert({variant, nullptr});
       if (c.second) {
         c.first->second = std::visit(
@@ -122,6 +123,10 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
             variant);
         cache->scheduler_.submit(c.first->second.get());
       }
+
+      auto end = std::chrono::high_resolution_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+      Logger::info(str::format("Generated 1 variant, time taken: ", duration.count(),  " microseconds"));
       return c.first->second.get();
     }
     virtual const Sha1Digest &sha1() { return sha1_; };

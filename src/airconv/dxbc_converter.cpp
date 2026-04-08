@@ -16,6 +16,7 @@
 #include <bit>
 #include <memory>
 #include <string>
+#include <fstream>
 #include <vector>
 
 #include "metallib_writer.hpp"
@@ -1363,6 +1364,8 @@ AIRCONV_API int SM50Compile(
 ) {
   using namespace llvm;
   using namespace dxmt;
+  std::ofstream file("/Users/mohsin/Documents/FYP/Logs/DXMT/sm50.log", std::ios::app);
+  file << "Compiling shader to AIR...\n";
 
   if (ppError) {
     *ppError = nullptr;

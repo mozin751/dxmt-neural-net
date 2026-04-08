@@ -5,6 +5,7 @@
 #include "d3d11_shader.hpp"
 #include "log/log.hpp"
 #include <atomic>
+#include <chrono>
 
 namespace dxmt {
 
@@ -52,15 +53,18 @@ public:
   }
 
   ThreadpoolWork *RunThreadpoolWork() {
-
+    // Logger::info("Start compiling 1 PSO");
+    auto start = std::chrono::high_resolution_clock::now();
     TRACE("Start compiling 1 PSO");
 
     WMT::Reference<WMT::Error> err;
     MTL_COMPILED_SHADER vs, ps;
     if (!VertexShader->GetShader(&vs)) {
+      Logger::info(str::format("PSO COMPILATION: Returned VertexShader"));
       return VertexShader;
     }
     if (PixelShader && !PixelShader->GetShader(&ps)) {
+      Logger::info(str::format("PSO COMPILATION: Returned PixelShader"));
       return PixelShader;
     }
 
@@ -104,6 +108,9 @@ public:
     }
 
     TRACE("Compiled 1 PSO");
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    Logger::info(str::format("Compiled 1 PSO, time taken: ", duration.count(),  " microseconds"));
 
     return this;
   }
