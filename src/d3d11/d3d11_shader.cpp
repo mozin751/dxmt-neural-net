@@ -30,6 +30,7 @@ public:
 
   ThreadpoolWork *
   RunThreadpoolWork() {
+    auto start = std::chrono::high_resolution_clock::now();
     auto pool = WMT::MakeAutoreleasePool();
     WMT::Reference<WMT::Error> err;
     WMT::Reference<WMT::DispatchData> lib_data = shader_->find_cached_variant(variant_digest_);
@@ -52,6 +53,8 @@ public:
       }
       break;
     }
+
+    bool cached = lib_data;
 
     if (!lib_data) {
       SM50_COMPILED_BITCODE bitcode;
@@ -81,6 +84,9 @@ public:
       }
     }
 
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    Logger::info(str::format("Generated 1 variant, time taken: ", duration.count(),  " microseconds", cached ? "(Cache hit)" : "(Cache miss)"));
     return this;
   }
 

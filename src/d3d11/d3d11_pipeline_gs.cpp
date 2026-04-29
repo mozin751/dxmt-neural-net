@@ -43,8 +43,12 @@ public:
   }
 
   void GetPipeline(MTL_COMPILED_GRAPHICS_PIPELINE *pPipeline) final {
+    auto start = std::chrono::high_resolution_clock::now();
     ready_.wait(false, std::memory_order_acquire);
     *pPipeline = {state_mesh_};
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    Logger::info(str::format("Time taken to GetPipeline (Geometry): ", duration.count(),  " microseconds"));
   }
 
   ThreadpoolWork *RunThreadpoolWork() {

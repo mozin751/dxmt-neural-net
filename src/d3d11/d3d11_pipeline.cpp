@@ -1,3 +1,4 @@
+#include <thread>
 #include "Metal.hpp"
 #include "d3d11_private.h"
 #include "d3d11_pipeline.hpp"
@@ -19,6 +20,7 @@ public:
         topology_class(pDesc->TopologyClass), device_(pDevice),
         pBlendState(pDesc->BlendState),
         RasterizationEnabled(pDesc->RasterizationEnabled),
+        waitTime(0),
         SampleCount(pDesc->SampleCount) {
     uint32_t unorm_output_reg_mask = 0;
     for (unsigned i = 0; i < num_rtvs; i++) {
@@ -48,26 +50,42 @@ public:
   }
 
   void GetPipeline(MTL_COMPILED_GRAPHICS_PIPELINE *pPipeline) final {
+    auto start = std::chrono::high_resolution_clock::now();
     ready_.wait(false, std::memory_order_acquire);
     *pPipeline = {state_};
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    // if (duration.count() > 1) {
+      // Logger::info(str::format("Time taken to GetPipeline: ", duration.count(),  " microseconds"));
+    // }
   }
 
   ThreadpoolWork *RunThreadpoolWork() {
     // Logger::info("Start compiling 1 PSO");
     auto start = std::chrono::high_resolution_clock::now();
     TRACE("Start compiling 1 PSO");
+    // std::this_thread::sleep_for(std::chrono::seconds(1));
 
     WMT::Reference<WMT::Error> err;
     MTL_COMPILED_SHADER vs, ps;
     if (!VertexShader->GetShader(&vs)) {
-      Logger::info(str::format("PSO COMPILATION: Returned VertexShader"));
+      Logger::info(str::format("PSO COMPILATION: yield"));
+      auto end = std::chrono::high_resolution_clock::now();
+      waitTime += std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
       return VertexShader;
     }
     if (PixelShader && !PixelShader->GetShader(&ps)) {
-      Logger::info(str::format("PSO COMPILATION: Returned PixelShader"));
+      Logger::info(str::format("PSO COMPILATION: yield"));
+      auto end = std::chrono::high_resolution_clock::now();
+      waitTime += std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
       return PixelShader;
     }
 
+    if (waitTime > 15) {
+      Logger::info(str::format("PSO Compilation, time waited: ", waitTime,  " microseconds"));
+    }
+
+    start = std::chrono::high_resolution_clock::now();
     WMTRenderPipelineInfo info;
     WMT::InitializeRenderPipelineInfo(info);
 
@@ -136,6 +154,7 @@ private:
   WMT::Reference<WMT::RenderPipelineState> state_;
   bool RasterizationEnabled;
   UINT SampleCount;
+  int waitTime;
 };
 
 std::unique_ptr<MTLCompiledGraphicsPipeline>
@@ -158,8 +177,12 @@ public:
   }
 
   void GetPipeline(MTL_COMPILED_COMPUTE_PIPELINE *pPipeline) final {
+    auto start = std::chrono::high_resolution_clock::now();
     ready_.wait(false, std::memory_order_acquire);
     *pPipeline = {state_};
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    // Logger::info(str::format("Time taken to GetPipeline (Compute): ", duration.count(),  " microseconds"));
   }
 
   ThreadpoolWork *RunThreadpoolWork() {

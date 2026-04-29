@@ -63,9 +63,13 @@ public:
   }
 
   void GetPipeline(MTL_COMPILED_TESSELLATION_MESH_PIPELINE *pPipeline) final {
+    auto start = std::chrono::high_resolution_clock::now();
     ready_.wait(false, std::memory_order_acquire);
     *pPipeline = {state_rasterization_, hull_reflection.NumOutputElement,
                   hull_reflection.ThreadsPerPatch};
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    Logger::info(str::format("Time taken to GetPipeline (Tesselation): ", duration.count(),  " microseconds"));
   }
 
   ThreadpoolWork *RunThreadpoolWork() {
