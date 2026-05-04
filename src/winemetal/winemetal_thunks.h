@@ -349,6 +349,11 @@ struct unixcall_mtlsharedevent_waituntilsignaledvalue {
   bool ret_timeout;
 };
 
+struct unixcall_get_cache_dir {
+  struct WMTMemoryPointer buffer;
+  uint64_t buffer_size;
+};
+
 #pragma pack(pop)
 
 #endif

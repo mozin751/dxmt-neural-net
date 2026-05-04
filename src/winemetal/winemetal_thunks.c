@@ -1118,3 +1118,11 @@ MTLSharedEvent_waitUntilSignaledValue(obj_handle_t event, uint64_t value, uint64
   UNIX_CALL(126, &params);
   return params.ret_timeout;
 }
+
+WINEMETAL_API void
+WMTGetCacheDir(char *buffer, uint64_t buffer_size) {
+  struct unixcall_get_cache_dir params;
+  WMT_MEMPTR_SET(params.buffer, buffer);
+  params.buffer_size = buffer_size;
+  UNIX_CALL(127, &params);
+}

@@ -7,11 +7,13 @@
 #include "dxmt_tasks.hpp"
 #include "log/log.hpp"
 #include "sha1/sha1_util.hpp"
+#include "util_env.hpp"
 #include "../d3d10/d3d10_shader.hpp"
 #include "../d3d10/d3d10_input_layout.hpp"
 #include <cstring>
 #include <shared_mutex>
 #include <unordered_map>
+#include <fstream>
 
 namespace dxmt {
 
@@ -192,6 +194,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   ShaderCache& scache_;
 
   std::unordered_map<size_t, std::string> pso_cache_;
+  size_t original_pso_cache_size_;
 
   task_scheduler<ThreadpoolWork *> scheduler_;
 
@@ -450,12 +453,72 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     *ppPipeline = iter->second.get();
   }
 
+  void save_cache(const std::unordered_map<size_t, std::string>& cache, const std::string& path) {
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) return;
+
+    uint32_t count = cache.size();
+    f.write(reinterpret_cast<const char*>(&count), sizeof(count));
+
+    for (const auto& [hash, filepath] : cache) {
+        f.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
+
+        uint32_t len = filepath.size();
+        f.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        f.write(filepath.data(), len);
+    }
+  }
+
+  void load_cache(std::unordered_map<size_t, std::string>& cache, const std::string& path) {
+      std::ifstream f(path, std::ios::binary);
+      if (!f) return;  // first run, file doesn't exist yet
+
+      uint32_t count = 0;
+      f.read(reinterpret_cast<char*>(&count), sizeof(count));
+
+      for (uint32_t i = 0; i < count; i++) {
+          size_t hash = 0;
+          f.read(reinterpret_cast<char*>(&hash), sizeof(hash));
+
+          uint32_t len = 0;
+          f.read(reinterpret_cast<char*>(&len), sizeof(len));
+
+          std::string filepath(len, '\0');
+          f.read(filepath.data(), len);
+
+          if (f.good()) {
+              cache[hash] = std::move(filepath);
+          }
+      }
+  }
+
+  std::string GetCachePath() {
+    std::string base;
+    if (base = env::getEnvVar("DXMT_SHADER_CACHE_PATH");
+        !base.empty() && base.starts_with("/")) {
+      if (!base.ends_with('/')) base += '/';
+    } else {
+      base = WMT::GetCacheDir() + str::format("dxmt/", env::getExeName(), "/");
+    }
+
+    return base;
+  }
+
 public:
   PipelineCache(MTLD3D11Device *pDevice) :
       scache_(ShaderCache::getInstance(pDevice->GetDXMTDevice().metalVersion())),
       device(pDevice),
       blend_states(pDevice),
-      so_layouts(pDevice) {};
+      so_layouts(pDevice) {
+    load_cache(pso_cache_, GetCachePath() + "cache_map.bin");
+    original_pso_cache_size_ = pso_cache_.size();
+  };
+
+  ~PipelineCache() {
+    if (original_pso_cache_size_ != pso_cache_.size()) {
+      save_cache(pso_cache_, GetCachePath() + "cache_map.bin");
+    }
+  }
 };
 
 std::unique_ptr<MTLD3D11PipelineCacheBase>

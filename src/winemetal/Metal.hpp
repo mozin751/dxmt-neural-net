@@ -1077,4 +1077,13 @@ InitializeMeshRenderPipelineInfo(WMTMeshRenderPipelineInfo &info) {
   info.fail_on_binary_archive_miss = false;
 }
 
+inline std::string GetCacheDir() {
+  char buffer[PATH_MAX];
+  WMTGetCacheDir(buffer, sizeof(buffer));
+  std::string result(buffer);
+  if (!result.empty() && !result.ends_with('/'))
+    result += '/';
+  return result;
+}
+
 } // namespace WMT

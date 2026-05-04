@@ -2660,6 +2660,16 @@ _MTLSharedEvent_waitUntilSignaledValue(void *obj) {
   return STATUS_SUCCESS;
 }
 
+static NTSTATUS
+_WMTGetCacheDir(void *args) {
+  struct unixcall_get_cache_dir *params = args;
+  char *buffer = params->buffer.ptr;
+  size_t len = confstr(_CS_DARWIN_USER_CACHE_DIR, buffer, params->buffer_size);
+  if (len == 0 && params->buffer_size > 0)
+    buffer[0] = '\0';
+  return STATUS_SUCCESS;
+}
+
 /*
  * Definition from cache.c
  */
@@ -2798,6 +2808,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLDevice_newSharedEventWithMachPort,
     &_MTLDevice_registryID,
     &_MTLSharedEvent_waitUntilSignaledValue,
+    &_WMTGetCacheDir,
 };
 
 #ifndef DXMT_NATIVE
@@ -2929,5 +2940,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLDevice_newSharedEventWithMachPort,
     &_MTLDevice_registryID,
     &_MTLSharedEvent_waitUntilSignaledValue,
+    &_WMTGetCacheDir,
 };
 #endif
