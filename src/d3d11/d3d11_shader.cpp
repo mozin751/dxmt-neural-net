@@ -28,6 +28,10 @@ public:
     return ret;
   }
 
+  const Sha1Digest& GetDigest() {
+    return variant_digest_;
+  }
+
   ThreadpoolWork *
   RunThreadpoolWork() {
     auto pool = WMT::MakeAutoreleasePool();

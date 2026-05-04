@@ -200,6 +200,7 @@ public:
   return false if it's not ready
    */
   virtual bool GetShader(MTL_COMPILED_SHADER *pShaderData) = 0;
+  virtual const Sha1Digest& GetDigest() = 0;
 };
 
 class Shader {

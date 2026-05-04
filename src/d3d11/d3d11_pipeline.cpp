@@ -5,6 +5,7 @@
 #include "d3d11_shader.hpp"
 #include "log/log.hpp"
 #include <atomic>
+#include <optional>
 
 namespace dxmt {
 
@@ -49,6 +50,88 @@ public:
   void GetPipeline(MTL_COMPILED_GRAPHICS_PIPELINE *pPipeline) final {
     ready_.wait(false, std::memory_order_acquire);
     *pPipeline = {state_};
+  }
+
+  static void hash_combine(size_t& seed, uint64_t value) {
+    seed ^= value + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+  }
+
+  static void hash_combine(size_t& seed, uint32_t value) {
+      hash_combine(seed, static_cast<uint64_t>(value));
+  }
+
+  static void hash_combine(size_t& seed, uint8_t value) {
+      hash_combine(seed, static_cast<uint64_t>(value));
+  }
+
+  static void hash_combine(size_t& seed, bool value) {
+      hash_combine(seed, static_cast<uint64_t>(value ? 1u : 0u));
+  }
+
+  static void hash_combine(size_t& seed, const Sha1Digest& digest) {
+      uint64_t chunk;
+
+      std::memcpy(&chunk, digest.data + 0,  sizeof(uint64_t)); hash_combine(seed, chunk);
+      std::memcpy(&chunk, digest.data + 8,  sizeof(uint64_t)); hash_combine(seed, chunk);
+
+      uint32_t tail;
+      std::memcpy(&tail,  digest.data + 16, sizeof(uint32_t)); hash_combine(seed, tail);
+  }
+
+  size_t hash_render_pipeline_info(
+      const WMTRenderPipelineInfo& info,
+      const Sha1Digest& vertex_digest,
+      const std::optional<Sha1Digest>& fragment_digest
+  ) {
+      size_t h = 0;
+
+      // Shader functions — stable content digests, not runtime handles
+      hash_combine(h, vertex_digest);
+
+      if (fragment_digest.has_value()) {
+        hash_combine(h, 1u);  // present
+        hash_combine(h, fragment_digest.value());
+      } else {
+          hash_combine(h, 0u);  // absent
+      }
+
+      // Color attachments (all 8, inactive slots will be zero and hash consistently)
+      for (int i = 0; i < 8; i++) {
+          const auto& c = info.colors[i];
+          hash_combine(h, static_cast<uint8_t>(c.pixel_format));
+          hash_combine(h, static_cast<uint8_t>(c.rgb_blend_operation));
+          hash_combine(h, static_cast<uint8_t>(c.alpha_blend_operation));
+          hash_combine(h, static_cast<uint8_t>(c.src_rgb_blend_factor));
+          hash_combine(h, static_cast<uint8_t>(c.dst_rgb_blend_factor));
+          hash_combine(h, static_cast<uint8_t>(c.src_alpha_blend_factor));
+          hash_combine(h, static_cast<uint8_t>(c.dst_alpha_blend_factor));
+          hash_combine(h, c.write_mask);
+          hash_combine(h, c.blending_enabled);
+      }
+
+      // Output merger state
+      hash_combine(h, info.alpha_to_coverage_enabled);
+      hash_combine(h, info.logic_operation_enabled);
+      hash_combine(h, static_cast<uint8_t>(info.logic_operation));
+      hash_combine(h, info.rasterization_enabled);
+      hash_combine(h, info.raster_sample_count);
+
+      // Attachment formats
+      hash_combine(h, static_cast<uint8_t>(info.depth_pixel_format));
+      hash_combine(h, static_cast<uint8_t>(info.stencil_pixel_format));
+
+      // Buffer immutability masks
+      hash_combine(h, info.immutable_vertex_buffers);
+      hash_combine(h, info.immutable_fragment_buffers);
+
+      // Topology and tessellation
+      hash_combine(h, static_cast<uint8_t>(info.input_primitive_topology));
+      hash_combine(h, static_cast<uint8_t>(info.tessellation_partition_mode));
+      hash_combine(h, info.max_tessellation_factor);
+      hash_combine(h, static_cast<uint8_t>(info.tessellation_output_winding_order));
+      hash_combine(h, static_cast<uint8_t>(info.tessellation_factor_step));
+
+      return h;
   }
 
   ThreadpoolWork *RunThreadpoolWork() {
@@ -105,6 +188,9 @@ public:
 
     TRACE("Compiled 1 PSO");
 
+    auto hash = hash_render_pipeline_info(info, VertexShader->GetDigest(), PixelShader ? std::optional<Sha1Digest>(PixelShader->GetDigest()) : std::nullopt);
+
+    Logger::info(str::format("pipeline_hash: ", hash));
     return this;
   }
 
