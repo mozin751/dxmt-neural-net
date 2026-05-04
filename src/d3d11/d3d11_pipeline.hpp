@@ -164,7 +164,7 @@ public:
 };
 
 std::unique_ptr<MTLCompiledGraphicsPipeline>
-CreateGraphicsPipeline(MTLD3D11Device *pDevice, MTL_GRAPHICS_PIPELINE_DESC *pDesc);
+CreateGraphicsPipeline(MTLD3D11Device *pDevice, MTL_GRAPHICS_PIPELINE_DESC *pDesc, std::unordered_map<size_t, std::string>& pso_cache);
 
 std::unique_ptr<MTLCompiledComputePipeline> CreateComputePipeline(MTLD3D11Device *pDevice, ManagedShader ComputeShader);
 

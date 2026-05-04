@@ -13,13 +13,15 @@ class MTLCompiledGraphicsPipelineImpl
     : public MTLCompiledGraphicsPipeline {
 public:
   MTLCompiledGraphicsPipelineImpl(MTLD3D11Device *pDevice,
-                              MTL_GRAPHICS_PIPELINE_DESC *pDesc)
+                              MTL_GRAPHICS_PIPELINE_DESC *pDesc,
+                              std::unordered_map<size_t, std::string>& pso_cache)
       : num_rtvs(pDesc->NumColorAttachments),
         depth_stencil_format(pDesc->DepthStencilFormat),
         topology_class(pDesc->TopologyClass), device_(pDevice),
         pBlendState(pDesc->BlendState),
         RasterizationEnabled(pDesc->RasterizationEnabled),
-        SampleCount(pDesc->SampleCount) {
+        SampleCount(pDesc->SampleCount), 
+        pso_cache_(pso_cache) {
     uint32_t unorm_output_reg_mask = 0;
     for (unsigned i = 0; i < num_rtvs; i++) {
       rtv_formats[i] = pDesc->ColorAttachmentFormats[i];
@@ -52,6 +54,84 @@ public:
     *pPipeline = {state_};
   }
 
+  ThreadpoolWork *RunThreadpoolWork() {
+
+    TRACE("Start compiling 1 PSO");
+
+    WMT::Reference<WMT::Error> err;
+    MTL_COMPILED_SHADER vs, ps;
+    if (!VertexShader->GetShader(&vs)) {
+      return VertexShader;
+    }
+    if (PixelShader && !PixelShader->GetShader(&ps)) {
+      return PixelShader;
+    }
+
+    WMTRenderPipelineInfo info;
+    WMT::InitializeRenderPipelineInfo(info);
+
+    info.vertex_function = vs.Function;
+
+    if (PixelShader) {
+      info.fragment_function = ps.Function;
+    }
+    info.rasterization_enabled = RasterizationEnabled;
+
+    for (unsigned i = 0; i < num_rtvs; i++) {
+      if (rtv_formats[i] == WMTPixelFormatInvalid)
+        continue;
+      info.colors[i].pixel_format = rtv_formats[i];
+    }
+
+    if (depth_stencil_format != WMTPixelFormatInvalid) {
+      info.depth_pixel_format = depth_stencil_format;
+    }
+    if (DepthStencilPlanarFlags(depth_stencil_format) & 2) {
+      info.stencil_pixel_format = depth_stencil_format;
+    }
+
+    if (pBlendState) {
+      pBlendState->SetupMetalPipelineDescriptor((WMTRenderPipelineBlendInfo *)&info, num_rtvs, ps_valid_render_targets);
+    }
+
+    info.input_primitive_topology = topology_class;
+    info.raster_sample_count = SampleCount;
+    info.immutable_vertex_buffers = (1 << 16) | (1 << 29) | (1 << 30);
+    info.immutable_fragment_buffers = (1 << 29) | (1 << 30);
+
+    state_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
+
+    if (state_ == nullptr) {
+      ERR("Failed to create PSO: ", err.description().getUTF8String());
+      return this;
+    }
+
+    TRACE("Compiled 1 PSO");
+
+    // auto start = std::chrono::high_resolution_clock::now();
+    auto hash = hash_render_pipeline_info(info, VertexShader->GetDigest(), PixelShader ? std::optional<Sha1Digest>(PixelShader->GetDigest()) : std::nullopt);
+
+    if (pso_cache_.find(hash) != pso_cache_.end()) {
+      Logger::info("Cache hit!");
+    } else {
+      pso_cache_[hash] = "foo";
+      Logger::info("Cache miss!");
+    }
+    // auto end = std::chrono::high_resolution_clock::now();
+    // auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    // Logger::info(str::format("Hashed, time taken: ", duration.count(),  " microseconds"));
+    // Logger::info(str::format("pipeline_hash: ", hash));
+    return this;
+  }
+
+  bool GetIsDone() { return ready_; }
+
+  void SetIsDone(bool state) {
+    ready_.store(state);
+    ready_.notify_all();
+  }
+
+private:
   static void hash_combine(size_t& seed, uint64_t value) {
     seed ^= value + 0x9e3779b9 + (seed << 6) + (seed >> 2);
   }
@@ -134,74 +214,6 @@ public:
       return h;
   }
 
-  ThreadpoolWork *RunThreadpoolWork() {
-
-    TRACE("Start compiling 1 PSO");
-
-    WMT::Reference<WMT::Error> err;
-    MTL_COMPILED_SHADER vs, ps;
-    if (!VertexShader->GetShader(&vs)) {
-      return VertexShader;
-    }
-    if (PixelShader && !PixelShader->GetShader(&ps)) {
-      return PixelShader;
-    }
-
-    WMTRenderPipelineInfo info;
-    WMT::InitializeRenderPipelineInfo(info);
-
-    info.vertex_function = vs.Function;
-
-    if (PixelShader) {
-      info.fragment_function = ps.Function;
-    }
-    info.rasterization_enabled = RasterizationEnabled;
-
-    for (unsigned i = 0; i < num_rtvs; i++) {
-      if (rtv_formats[i] == WMTPixelFormatInvalid)
-        continue;
-      info.colors[i].pixel_format = rtv_formats[i];
-    }
-
-    if (depth_stencil_format != WMTPixelFormatInvalid) {
-      info.depth_pixel_format = depth_stencil_format;
-    }
-    if (DepthStencilPlanarFlags(depth_stencil_format) & 2) {
-      info.stencil_pixel_format = depth_stencil_format;
-    }
-
-    if (pBlendState) {
-      pBlendState->SetupMetalPipelineDescriptor((WMTRenderPipelineBlendInfo *)&info, num_rtvs, ps_valid_render_targets);
-    }
-
-    info.input_primitive_topology = topology_class;
-    info.raster_sample_count = SampleCount;
-    info.immutable_vertex_buffers = (1 << 16) | (1 << 29) | (1 << 30);
-    info.immutable_fragment_buffers = (1 << 29) | (1 << 30);
-
-    state_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
-
-    if (state_ == nullptr) {
-      ERR("Failed to create PSO: ", err.description().getUTF8String());
-      return this;
-    }
-
-    TRACE("Compiled 1 PSO");
-
-    auto hash = hash_render_pipeline_info(info, VertexShader->GetDigest(), PixelShader ? std::optional<Sha1Digest>(PixelShader->GetDigest()) : std::nullopt);
-
-    Logger::info(str::format("pipeline_hash: ", hash));
-    return this;
-  }
-
-  bool GetIsDone() { return ready_; }
-
-  void SetIsDone(bool state) {
-    ready_.store(state);
-    ready_.notify_all();
-  }
-
-private:
   UINT num_rtvs;
   UINT ps_valid_render_targets;
   WMTPixelFormat rtv_formats[8];
@@ -215,12 +227,14 @@ private:
   WMT::Reference<WMT::RenderPipelineState> state_;
   bool RasterizationEnabled;
   UINT SampleCount;
+  std::unordered_map<size_t, std::string>& pso_cache_;
 };
 
 std::unique_ptr<MTLCompiledGraphicsPipeline>
 CreateGraphicsPipeline(MTLD3D11Device *pDevice,
-                       MTL_GRAPHICS_PIPELINE_DESC *pDesc) {
-  return std::make_unique<MTLCompiledGraphicsPipelineImpl>(pDevice, pDesc);
+                       MTL_GRAPHICS_PIPELINE_DESC *pDesc,
+                       std::unordered_map<size_t, std::string>& pso_cache) {
+  return std::make_unique<MTLCompiledGraphicsPipelineImpl>(pDevice, pDesc, pso_cache);
 }
 
 class MTLCompiledComputePipelineImpl

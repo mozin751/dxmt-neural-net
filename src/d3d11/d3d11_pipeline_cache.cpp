@@ -11,6 +11,7 @@
 #include "../d3d10/d3d10_input_layout.hpp"
 #include <cstring>
 #include <shared_mutex>
+#include <unordered_map>
 
 namespace dxmt {
 
@@ -189,6 +190,8 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   };
 
   ShaderCache& scache_;
+
+  std::unordered_map<size_t, std::string> pso_cache_;
 
   task_scheduler<ThreadpoolWork *> scheduler_;
 
@@ -385,7 +388,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       *ppPipeline = iter->second.get();
       return;
     }
-    auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc)});
+    auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc, pso_cache_)});
     if (!inserted) {
       D3D11_ASSERT(0 && "duplicated graphics pipeline");
     } else {
