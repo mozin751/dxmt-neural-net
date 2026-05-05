@@ -15,14 +15,16 @@ class MTLCompiledGraphicsPipelineImpl
 public:
   MTLCompiledGraphicsPipelineImpl(MTLD3D11Device *pDevice,
                               MTL_GRAPHICS_PIPELINE_DESC *pDesc,
-                              std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>>& pso_cache)
+                              std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>>& pso_cache,
+                              std::mutex& pso_cache_mutex)
       : num_rtvs(pDesc->NumColorAttachments),
         depth_stencil_format(pDesc->DepthStencilFormat),
         topology_class(pDesc->TopologyClass), device_(pDevice),
         pBlendState(pDesc->BlendState),
         RasterizationEnabled(pDesc->RasterizationEnabled),
         SampleCount(pDesc->SampleCount), 
-        pso_cache_(pso_cache) {
+        pso_cache_(pso_cache),
+        pso_cache_mutex_(pso_cache_mutex) {
     uint32_t unorm_output_reg_mask = 0;
     for (unsigned i = 0; i < num_rtvs; i++) {
       rtv_formats[i] = pDesc->ColorAttachmentFormats[i];
@@ -101,29 +103,34 @@ public:
     info.immutable_fragment_buffers = (1 << 29) | (1 << 30);
     
     auto hash = hash_render_pipeline_info(info, VertexShader->GetDigest(), PixelShader ? std::optional<Sha1Digest>(PixelShader->GetDigest()) : std::nullopt);
-    bool cache_hit = false;
-    if (pso_cache_.find(hash) == pso_cache_.end()) {
-      pso_cache_[hash] = device_->GetMTLDevice().newBinaryArchive(nullptr, err);
-      info.binary_archive_for_serialization = pso_cache_[hash];
-    } else {
-      // TODO: Cache hit code
+    bool cached = false;
+    WMT::Reference<WMT::BinaryArchive> archive;
+    {
+      std::lock_guard<std::mutex> lock(pso_cache_mutex_);
+      if (pso_cache_.find(hash) == pso_cache_.end()) {
+        archive = device_->GetMTLDevice().newBinaryArchive(nullptr, err);
+        info.binary_archive_for_serialization = archive;
+      } else {
+        info.binary_archives_for_lookup.set(&pso_cache_[hash]);
+        info.num_binary_archives_for_lookup = 1;
+        info.fail_on_binary_archive_miss = true;
+        cached = true;
+      }
     }
 
-    state_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
-
-    if (!cache_hit) {
-      // auto start = std::chrono::high_resolution_clock::now();
-      // pso_cache_[hash].serialize((WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin").c_str(), err);
-      // auto end = std::chrono::high_resolution_clock::now();
-      // auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-      // Logger::info(str::format("Serialised archive, time taken: ", duration.count(),  " microseconds"));
-    }
+    WMT::Reference<WMT::Error> error;
+    state_ = device_->GetMTLDevice().newRenderPipelineState(info, error);
 
     if (state_ == nullptr) {
-      ERR("Failed to create PSO: ", err.description().getUTF8String());
+      ERR("Failed to create PSO: ", error.description().getUTF8String());
       return this;
     }
-
+    
+    if (!cached) {
+      // pso_cache_[hash].serialize((WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin").c_str(), err);
+      std::lock_guard<std::mutex> lock(pso_cache_mutex_);
+      pso_cache_[hash] = archive;
+    }
     TRACE("Compiled 1 PSO");
 
     return this;
@@ -233,13 +240,15 @@ private:
   bool RasterizationEnabled;
   UINT SampleCount;
   std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>>& pso_cache_;
+  std::mutex& pso_cache_mutex_;
 };
 
 std::unique_ptr<MTLCompiledGraphicsPipeline>
 CreateGraphicsPipeline(MTLD3D11Device *pDevice,
                        MTL_GRAPHICS_PIPELINE_DESC *pDesc,
-                       std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>>& pso_cache) {
-  return std::make_unique<MTLCompiledGraphicsPipelineImpl>(pDevice, pDesc, pso_cache);
+                       std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>>& pso_cache,
+                       std::mutex& pso_cache_mutex) {
+  return std::make_unique<MTLCompiledGraphicsPipelineImpl>(pDevice, pDesc, pso_cache, pso_cache_mutex);
 }
 
 class MTLCompiledComputePipelineImpl

@@ -195,6 +195,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   ShaderCache& scache_;
 
   std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>> pso_cache_;
+  std::mutex pso_cache_mutex_;
   size_t original_pso_cache_size_;
 
   task_scheduler<ThreadpoolWork *> scheduler_;
@@ -392,7 +393,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       *ppPipeline = iter->second.get();
       return;
     }
-    auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc, pso_cache_)});
+    auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc, pso_cache_, pso_cache_mutex_)});
     if (!inserted) {
       D3D11_ASSERT(0 && "duplicated graphics pipeline");
     } else {
@@ -464,7 +465,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     WMT::Reference<WMT::Error> err;
     for (auto& [hash, archive] : cache) {
         f.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
-        archive.serialize((WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin").c_str(), err);
+        // archive.serialize((WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin").c_str(), err);
     }
   }
 
