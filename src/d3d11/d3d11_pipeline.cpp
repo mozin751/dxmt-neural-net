@@ -3,6 +3,7 @@
 #include "d3d11_pipeline.hpp"
 #include "d3d11_device.hpp"
 #include "d3d11_shader.hpp"
+#include "util_env.hpp"
 #include "log/log.hpp"
 #include <atomic>
 #include <optional>
@@ -14,14 +15,16 @@ class MTLCompiledGraphicsPipelineImpl
 public:
   MTLCompiledGraphicsPipelineImpl(MTLD3D11Device *pDevice,
                               MTL_GRAPHICS_PIPELINE_DESC *pDesc,
-                              std::unordered_map<size_t, std::string>& pso_cache)
+                              std::unordered_map<size_t, uint32_t>& pso_cache,
+                              std::vector<WMT::Reference<WMT::BinaryArchive>>& bin_archives)
       : num_rtvs(pDesc->NumColorAttachments),
         depth_stencil_format(pDesc->DepthStencilFormat),
         topology_class(pDesc->TopologyClass), device_(pDevice),
         pBlendState(pDesc->BlendState),
         RasterizationEnabled(pDesc->RasterizationEnabled),
         SampleCount(pDesc->SampleCount), 
-        pso_cache_(pso_cache) {
+        pso_cache_(pso_cache),
+        bin_archives_(bin_archives) {
     uint32_t unorm_output_reg_mask = 0;
     for (unsigned i = 0; i < num_rtvs; i++) {
       rtv_formats[i] = pDesc->ColorAttachmentFormats[i];
@@ -98,8 +101,27 @@ public:
     info.raster_sample_count = SampleCount;
     info.immutable_vertex_buffers = (1 << 16) | (1 << 29) | (1 << 30);
     info.immutable_fragment_buffers = (1 << 29) | (1 << 30);
+    
+    auto hash = hash_render_pipeline_info(info, VertexShader->GetDigest(), PixelShader ? std::optional<Sha1Digest>(PixelShader->GetDigest()) : std::nullopt);
+    bool cache_hit = false;
+    WMT::Reference<WMT::BinaryArchive> bin_archive;
+    if (pso_cache_.find(hash) == pso_cache_.end()) {
+      bin_archive = device_->GetMTLDevice().newBinaryArchive(nullptr, err);
+      info.binary_archive_for_serialization = bin_archive;
+    } else {
+      // TODO: Cache hit code
+    }
 
     state_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
+
+    if (!cache_hit) {
+      auto start = std::chrono::high_resolution_clock::now();
+      bin_archive.serialize((WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin").c_str(), err);
+      auto end = std::chrono::high_resolution_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+      Logger::info(str::format("Serialised archive, time taken: ", duration.count(),  " microseconds"));
+      pso_cache_[hash] = 6;
+    }
 
     if (state_ == nullptr) {
       ERR("Failed to create PSO: ", err.description().getUTF8String());
@@ -108,19 +130,6 @@ public:
 
     TRACE("Compiled 1 PSO");
 
-    // auto start = std::chrono::high_resolution_clock::now();
-    auto hash = hash_render_pipeline_info(info, VertexShader->GetDigest(), PixelShader ? std::optional<Sha1Digest>(PixelShader->GetDigest()) : std::nullopt);
-
-    if (pso_cache_.find(hash) != pso_cache_.end()) {
-      Logger::info("Cache hit!");
-    } else {
-      pso_cache_[hash] = "foo";
-      Logger::info("Cache miss!");
-    }
-    // auto end = std::chrono::high_resolution_clock::now();
-    // auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-    // Logger::info(str::format("Hashed, time taken: ", duration.count(),  " microseconds"));
-    // Logger::info(str::format("pipeline_hash: ", hash));
     return this;
   }
 
@@ -227,14 +236,16 @@ private:
   WMT::Reference<WMT::RenderPipelineState> state_;
   bool RasterizationEnabled;
   UINT SampleCount;
-  std::unordered_map<size_t, std::string>& pso_cache_;
+  std::unordered_map<size_t, uint32_t>& pso_cache_;
+  std::vector<WMT::Reference<WMT::BinaryArchive>> bin_archives_;
 };
 
 std::unique_ptr<MTLCompiledGraphicsPipeline>
 CreateGraphicsPipeline(MTLD3D11Device *pDevice,
                        MTL_GRAPHICS_PIPELINE_DESC *pDesc,
-                       std::unordered_map<size_t, std::string>& pso_cache) {
-  return std::make_unique<MTLCompiledGraphicsPipelineImpl>(pDevice, pDesc, pso_cache);
+                       std::unordered_map<size_t, uint32_t>& pso_cache,
+                       std::vector<WMT::Reference<WMT::BinaryArchive>>& bin_archives) {
+  return std::make_unique<MTLCompiledGraphicsPipelineImpl>(pDevice, pDesc, pso_cache, bin_archives);
 }
 
 class MTLCompiledComputePipelineImpl

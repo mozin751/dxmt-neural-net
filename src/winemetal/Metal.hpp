@@ -1,6 +1,7 @@
 #pragma once
 
 #include "./winemetal.h"
+#include "util_env.hpp"
 #include <cstddef>
 #include <string>
 #include <cstring>
@@ -1078,12 +1079,21 @@ InitializeMeshRenderPipelineInfo(WMTMeshRenderPipelineInfo &info) {
 }
 
 inline std::string GetCacheDir() {
-  char buffer[PATH_MAX];
-  WMTGetCacheDir(buffer, sizeof(buffer));
-  std::string result(buffer);
-  if (!result.empty() && !result.ends_with('/'))
-    result += '/';
-  return result;
+  std::string base;
+
+  if (base = dxmt::env::getEnvVar("DXMT_SHADER_CACHE_PATH");
+      !base.empty() && base.starts_with("/")) {
+    if (!base.ends_with('/')) base += '/';
+  } else {
+    char buffer[PATH_MAX];
+    WMTGetCacheDir(buffer, sizeof(buffer));
+    std::string result(buffer);
+    if (!result.empty() && !result.ends_with('/'))
+      result += '/';
+    base = result;
+  }
+
+  return base + "dxmt/" + dxmt::env::getExeName() + "/";
 }
 
 } // namespace WMT

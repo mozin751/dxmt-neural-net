@@ -193,7 +193,8 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 
   ShaderCache& scache_;
 
-  std::unordered_map<size_t, std::string> pso_cache_;
+  std::unordered_map<size_t, uint32_t> pso_cache_;
+  std::vector<WMT::Reference<WMT::BinaryArchive>> bin_archives_;
   size_t original_pso_cache_size_;
 
   task_scheduler<ThreadpoolWork *> scheduler_;
@@ -391,7 +392,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       *ppPipeline = iter->second.get();
       return;
     }
-    auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc, pso_cache_)});
+    auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc, pso_cache_, bin_archives_)});
     if (!inserted) {
       D3D11_ASSERT(0 && "duplicated graphics pipeline");
     } else {
@@ -453,55 +454,37 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     *ppPipeline = iter->second.get();
   }
 
-  void save_cache(const std::unordered_map<size_t, std::string>& cache, const std::string& path) {
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) return;
+  void save_cache(const std::unordered_map<size_t, uint32_t>& cache, const std::string& path) {
+      std::ofstream f(path, std::ios::binary | std::ios::trunc);
+      if (!f) return;
 
-    uint32_t count = cache.size();
-    f.write(reinterpret_cast<const char*>(&count), sizeof(count));
+      uint32_t count = cache.size();
+      f.write(reinterpret_cast<const char*>(&count), sizeof(count));
 
-    for (const auto& [hash, filepath] : cache) {
-        f.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
-
-        uint32_t len = filepath.size();
-        f.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        f.write(filepath.data(), len);
-    }
-  }
-
-  void load_cache(std::unordered_map<size_t, std::string>& cache, const std::string& path) {
-      std::ifstream f(path, std::ios::binary);
-      if (!f) return;  // first run, file doesn't exist yet
-
-      uint32_t count = 0;
-      f.read(reinterpret_cast<char*>(&count), sizeof(count));
-
-      for (uint32_t i = 0; i < count; i++) {
-          size_t hash = 0;
-          f.read(reinterpret_cast<char*>(&hash), sizeof(hash));
-
-          uint32_t len = 0;
-          f.read(reinterpret_cast<char*>(&len), sizeof(len));
-
-          std::string filepath(len, '\0');
-          f.read(filepath.data(), len);
-
-          if (f.good()) {
-              cache[hash] = std::move(filepath);
-          }
+      for (const auto& [hash, index] : cache) {
+          f.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
+          f.write(reinterpret_cast<const char*>(&index), sizeof(index));
       }
   }
 
-  std::string GetCachePath() {
-    std::string base;
-    if (base = env::getEnvVar("DXMT_SHADER_CACHE_PATH");
-        !base.empty() && base.starts_with("/")) {
-      if (!base.ends_with('/')) base += '/';
-    } else {
-      base = WMT::GetCacheDir() + str::format("dxmt/", env::getExeName(), "/");
-    }
+  void load_cache(std::unordered_map<size_t, uint32_t>& cache, const std::string& path) {
+      std::ifstream f(path, std::ios::binary);
+      if (!f) return;
 
-    return base;
+      uint32_t count = 0;
+      f.read(reinterpret_cast<char*>(&count), sizeof(count));
+      cache.reserve(count);
+
+      for (uint32_t i = 0; i < count; i++) {
+          size_t hash = 0;
+          uint32_t index = 0;
+          f.read(reinterpret_cast<char*>(&hash), sizeof(hash));
+          f.read(reinterpret_cast<char*>(&index), sizeof(index));
+
+          if (f.good()) {
+              cache[hash] = index;
+          }
+      }
   }
 
 public:
@@ -510,13 +493,13 @@ public:
       device(pDevice),
       blend_states(pDevice),
       so_layouts(pDevice) {
-    load_cache(pso_cache_, GetCachePath() + "cache_map.bin");
+    load_cache(pso_cache_, WMT::GetCacheDir() + "cache_map.bin");
     original_pso_cache_size_ = pso_cache_.size();
   };
 
   ~PipelineCache() {
     if (original_pso_cache_size_ != pso_cache_.size()) {
-      save_cache(pso_cache_, GetCachePath() + "cache_map.bin");
+      save_cache(pso_cache_, WMT::GetCacheDir() + "cache_map.bin");
     }
   }
 };
