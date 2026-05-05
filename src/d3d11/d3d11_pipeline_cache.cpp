@@ -193,8 +193,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 
   ShaderCache& scache_;
 
-  std::unordered_map<size_t, uint32_t> pso_cache_;
-  std::vector<WMT::Reference<WMT::BinaryArchive>> bin_archives_;
+  std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>> pso_cache_;
   size_t original_pso_cache_size_;
 
   task_scheduler<ThreadpoolWork *> scheduler_;
@@ -392,7 +391,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       *ppPipeline = iter->second.get();
       return;
     }
-    auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc, pso_cache_, bin_archives_)});
+    auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc, pso_cache_)});
     if (!inserted) {
       D3D11_ASSERT(0 && "duplicated graphics pipeline");
     } else {
@@ -454,35 +453,40 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     *ppPipeline = iter->second.get();
   }
 
-  void save_cache(const std::unordered_map<size_t, uint32_t>& cache, const std::string& path) {
+  void save_cache(const std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>>& cache, const std::string& path) {
       std::ofstream f(path, std::ios::binary | std::ios::trunc);
       if (!f) return;
 
       uint32_t count = cache.size();
       f.write(reinterpret_cast<const char*>(&count), sizeof(count));
 
-      for (const auto& [hash, index] : cache) {
+      for (const auto& [hash, _] : cache) {
           f.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
-          f.write(reinterpret_cast<const char*>(&index), sizeof(index));
       }
   }
 
-  void load_cache(std::unordered_map<size_t, uint32_t>& cache, const std::string& path) {
+  void load_cache(std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>>& cache, const std::string& path) {
       std::ifstream f(path, std::ios::binary);
       if (!f) return;
 
       uint32_t count = 0;
       f.read(reinterpret_cast<char*>(&count), sizeof(count));
-      cache.reserve(count);
+      cache.reserve(count * 2 < 100 ? 100 : count * 2);
 
       for (uint32_t i = 0; i < count; i++) {
           size_t hash = 0;
-          uint32_t index = 0;
           f.read(reinterpret_cast<char*>(&hash), sizeof(hash));
-          f.read(reinterpret_cast<char*>(&index), sizeof(index));
 
-          if (f.good()) {
-              cache[hash] = index;
+          if (!f.good()) {
+              break;
+          }
+
+          std::string bin_path = WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin";
+          WMT::Reference<WMT::Error> err;
+          WMT::Reference<WMT::BinaryArchive> archive = device->GetMTLDevice().newBinaryArchive(bin_path.c_str(), err);
+
+          if (archive) {
+            cache[hash] = archive;
           }
       }
   }

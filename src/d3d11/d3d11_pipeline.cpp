@@ -15,16 +15,14 @@ class MTLCompiledGraphicsPipelineImpl
 public:
   MTLCompiledGraphicsPipelineImpl(MTLD3D11Device *pDevice,
                               MTL_GRAPHICS_PIPELINE_DESC *pDesc,
-                              std::unordered_map<size_t, uint32_t>& pso_cache,
-                              std::vector<WMT::Reference<WMT::BinaryArchive>>& bin_archives)
+                              std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>>& pso_cache)
       : num_rtvs(pDesc->NumColorAttachments),
         depth_stencil_format(pDesc->DepthStencilFormat),
         topology_class(pDesc->TopologyClass), device_(pDevice),
         pBlendState(pDesc->BlendState),
         RasterizationEnabled(pDesc->RasterizationEnabled),
         SampleCount(pDesc->SampleCount), 
-        pso_cache_(pso_cache),
-        bin_archives_(bin_archives) {
+        pso_cache_(pso_cache) {
     uint32_t unorm_output_reg_mask = 0;
     for (unsigned i = 0; i < num_rtvs; i++) {
       rtv_formats[i] = pDesc->ColorAttachmentFormats[i];
@@ -236,16 +234,14 @@ private:
   WMT::Reference<WMT::RenderPipelineState> state_;
   bool RasterizationEnabled;
   UINT SampleCount;
-  std::unordered_map<size_t, uint32_t>& pso_cache_;
-  std::vector<WMT::Reference<WMT::BinaryArchive>> bin_archives_;
+  std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>>& pso_cache_;
 };
 
 std::unique_ptr<MTLCompiledGraphicsPipeline>
 CreateGraphicsPipeline(MTLD3D11Device *pDevice,
                        MTL_GRAPHICS_PIPELINE_DESC *pDesc,
-                       std::unordered_map<size_t, uint32_t>& pso_cache,
-                       std::vector<WMT::Reference<WMT::BinaryArchive>>& bin_archives) {
-  return std::make_unique<MTLCompiledGraphicsPipelineImpl>(pDevice, pDesc, pso_cache, bin_archives);
+                       std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>>& pso_cache) {
+  return std::make_unique<MTLCompiledGraphicsPipelineImpl>(pDevice, pDesc, pso_cache);
 }
 
 class MTLCompiledComputePipelineImpl
