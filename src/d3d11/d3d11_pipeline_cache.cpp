@@ -13,6 +13,7 @@
 #include <cstring>
 #include <shared_mutex>
 #include <unordered_map>
+#include<unordered_set>
 #include <fstream>
 
 namespace dxmt {
@@ -453,42 +454,46 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     *ppPipeline = iter->second.get();
   }
 
-  void save_cache(const std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>>& cache, const std::string& path) {
-      std::ofstream f(path, std::ios::binary | std::ios::trunc);
-      if (!f) return;
+  void save_cache(std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>>& cache, const std::string& path) {
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) return;
 
-      uint32_t count = cache.size();
-      f.write(reinterpret_cast<const char*>(&count), sizeof(count));
+    uint32_t count = cache.size();
+    f.write(reinterpret_cast<const char*>(&count), sizeof(count));
 
-      for (const auto& [hash, _] : cache) {
-          f.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
-      }
+    WMT::Reference<WMT::Error> err;
+    for (auto& [hash, archive] : cache) {
+        f.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
+        archive.serialize((WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin").c_str(), err);
+    }
   }
 
   void load_cache(std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>>& cache, const std::string& path) {
-      std::ifstream f(path, std::ios::binary);
-      if (!f) return;
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return;
 
-      uint32_t count = 0;
-      f.read(reinterpret_cast<char*>(&count), sizeof(count));
-      cache.reserve(count * 2 < 100 ? 100 : count * 2);
+    uint32_t count = 0;
+    f.read(reinterpret_cast<char*>(&count), sizeof(count));
+    cache.reserve(count * 2 < 100 ? 100 : count * 2);
 
-      for (uint32_t i = 0; i < count; i++) {
-          size_t hash = 0;
-          f.read(reinterpret_cast<char*>(&hash), sizeof(hash));
+    for (uint32_t i = 0; i < count; i++) {
+        size_t hash = 0;
+        f.read(reinterpret_cast<char*>(&hash), sizeof(hash));
 
-          if (!f.good()) {
-              break;
-          }
+        if (!f.good()) {
+            break;
+        }
 
-          std::string bin_path = WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin";
-          WMT::Reference<WMT::Error> err;
-          WMT::Reference<WMT::BinaryArchive> archive = device->GetMTLDevice().newBinaryArchive(bin_path.c_str(), err);
+        std::string bin_path = WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin";
+        WMT::Reference<WMT::Error> err;
+        WMT::Reference<WMT::BinaryArchive> archive = device->GetMTLDevice().newBinaryArchive(bin_path.c_str(), err);
 
-          if (archive) {
-            cache[hash] = archive;
-          }
-      }
+        if (archive) {
+          cache[hash] = archive;
+        }
+    }
+    
+
   }
 
 public:

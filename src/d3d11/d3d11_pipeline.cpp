@@ -102,10 +102,9 @@ public:
     
     auto hash = hash_render_pipeline_info(info, VertexShader->GetDigest(), PixelShader ? std::optional<Sha1Digest>(PixelShader->GetDigest()) : std::nullopt);
     bool cache_hit = false;
-    WMT::Reference<WMT::BinaryArchive> bin_archive;
     if (pso_cache_.find(hash) == pso_cache_.end()) {
-      bin_archive = device_->GetMTLDevice().newBinaryArchive(nullptr, err);
-      info.binary_archive_for_serialization = bin_archive;
+      pso_cache_[hash] = device_->GetMTLDevice().newBinaryArchive(nullptr, err);
+      info.binary_archive_for_serialization = pso_cache_[hash];
     } else {
       // TODO: Cache hit code
     }
@@ -113,12 +112,11 @@ public:
     state_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
 
     if (!cache_hit) {
-      auto start = std::chrono::high_resolution_clock::now();
-      bin_archive.serialize((WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin").c_str(), err);
-      auto end = std::chrono::high_resolution_clock::now();
-      auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-      Logger::info(str::format("Serialised archive, time taken: ", duration.count(),  " microseconds"));
-      pso_cache_[hash] = 6;
+      // auto start = std::chrono::high_resolution_clock::now();
+      // pso_cache_[hash].serialize((WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin").c_str(), err);
+      // auto end = std::chrono::high_resolution_clock::now();
+      // auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+      // Logger::info(str::format("Serialised archive, time taken: ", duration.count(),  " microseconds"));
     }
 
     if (state_ == nullptr) {
