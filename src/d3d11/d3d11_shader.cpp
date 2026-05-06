@@ -28,8 +28,8 @@ public:
     return ret;
   }
 
-  const Sha1Digest& GetDigest() {
-    return variant_digest_;
+  const std::string& GetFuncName() {
+    return func_name;
   }
 
   ThreadpoolWork *

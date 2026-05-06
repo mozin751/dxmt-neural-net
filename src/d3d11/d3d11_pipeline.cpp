@@ -102,8 +102,9 @@ public:
     info.immutable_vertex_buffers = (1 << 16) | (1 << 29) | (1 << 30);
     info.immutable_fragment_buffers = (1 << 29) | (1 << 30);
     
-    auto hash = hash_render_pipeline_info(info, VertexShader->GetDigest(), PixelShader ? std::optional<Sha1Digest>(PixelShader->GetDigest()) : std::nullopt);
+    auto hash = hash_render_pipeline_info(info, VertexShader->GetFuncName(), PixelShader ? std::optional<std::string>(PixelShader->GetFuncName()) : std::nullopt);
     bool cached = false;
+    obj_handle_t lookup_handle = NULL_OBJECT_HANDLE;
     WMT::Reference<WMT::BinaryArchive> archive;
     {
       std::lock_guard<std::mutex> lock(pso_cache_mutex_);
@@ -111,15 +112,19 @@ public:
         archive = device_->GetMTLDevice().newBinaryArchive(nullptr, err);
         info.binary_archive_for_serialization = archive;
       } else {
-        info.binary_archives_for_lookup.set(&pso_cache_[hash]);
+        lookup_handle = pso_cache_[hash].handle;
+        info.binary_archives_for_lookup.set(&lookup_handle);
         info.num_binary_archives_for_lookup = 1;
         info.fail_on_binary_archive_miss = true;
         cached = true;
       }
     }
 
+    auto start = std::chrono::high_resolution_clock::now();
     WMT::Reference<WMT::Error> error;
     state_ = device_->GetMTLDevice().newRenderPipelineState(info, error);
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
     if (state_ == nullptr) {
       ERR("Failed to create PSO: ", error.description().getUTF8String());
@@ -127,7 +132,6 @@ public:
     }
     
     if (!cached) {
-      // pso_cache_[hash].serialize((WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin").c_str(), err);
       std::lock_guard<std::mutex> lock(pso_cache_mutex_);
       pso_cache_[hash] = archive;
     }
@@ -149,40 +153,46 @@ private:
   }
 
   static void hash_combine(size_t& seed, uint32_t value) {
-      hash_combine(seed, static_cast<uint64_t>(value));
+    hash_combine(seed, static_cast<uint64_t>(value));
   }
 
   static void hash_combine(size_t& seed, uint8_t value) {
-      hash_combine(seed, static_cast<uint64_t>(value));
+    hash_combine(seed, static_cast<uint64_t>(value));
   }
 
   static void hash_combine(size_t& seed, bool value) {
-      hash_combine(seed, static_cast<uint64_t>(value ? 1u : 0u));
+    hash_combine(seed, static_cast<uint64_t>(value ? 1u : 0u));
   }
 
   static void hash_combine(size_t& seed, const Sha1Digest& digest) {
-      uint64_t chunk;
+    uint64_t chunk;
 
-      std::memcpy(&chunk, digest.data + 0,  sizeof(uint64_t)); hash_combine(seed, chunk);
-      std::memcpy(&chunk, digest.data + 8,  sizeof(uint64_t)); hash_combine(seed, chunk);
+    std::memcpy(&chunk, digest.data + 0,  sizeof(uint64_t)); hash_combine(seed, chunk);
+    std::memcpy(&chunk, digest.data + 8,  sizeof(uint64_t)); hash_combine(seed, chunk);
 
-      uint32_t tail;
-      std::memcpy(&tail,  digest.data + 16, sizeof(uint32_t)); hash_combine(seed, tail);
+    uint32_t tail;
+    std::memcpy(&tail,  digest.data + 16, sizeof(uint32_t)); hash_combine(seed, tail);
+  }
+
+  static void hash_combine(size_t& seed, const std::string& value) {
+    for (char c : value) {
+      hash_combine(seed, static_cast<uint8_t>(c));
+    }
   }
 
   size_t hash_render_pipeline_info(
       const WMTRenderPipelineInfo& info,
-      const Sha1Digest& vertex_digest,
-      const std::optional<Sha1Digest>& fragment_digest
+      const std::string& vertex_func_name,
+      const std::optional<std::string>& fragment_func_name
   ) {
       size_t h = 0;
 
       // Shader functions — stable content digests, not runtime handles
-      hash_combine(h, vertex_digest);
+      hash_combine(h, vertex_func_name);
 
-      if (fragment_digest.has_value()) {
+      if (fragment_func_name.has_value()) {
         hash_combine(h, 1u);  // present
-        hash_combine(h, fragment_digest.value());
+        hash_combine(h, fragment_func_name.value());
       } else {
           hash_combine(h, 0u);  // absent
       }

@@ -465,7 +465,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     WMT::Reference<WMT::Error> err;
     for (auto& [hash, archive] : cache) {
         f.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
-        // archive.serialize((WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin").c_str(), err);
+        archive.serialize((WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin").c_str(), err);
     }
   }
 
