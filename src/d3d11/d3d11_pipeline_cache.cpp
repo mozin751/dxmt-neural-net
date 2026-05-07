@@ -7,10 +7,14 @@
 #include "dxmt_tasks.hpp"
 #include "log/log.hpp"
 #include "sha1/sha1_util.hpp"
+#include "util_env.hpp"
 #include "../d3d10/d3d10_shader.hpp"
 #include "../d3d10/d3d10_input_layout.hpp"
 #include <cstring>
 #include <shared_mutex>
+#include <unordered_map>
+#include<unordered_set>
+#include <fstream>
 
 namespace dxmt {
 
@@ -189,6 +193,10 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   };
 
   ShaderCache& scache_;
+
+  std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>> pso_cache_;
+  std::mutex pso_cache_mutex_;
+  size_t original_pso_cache_size_;
 
   task_scheduler<ThreadpoolWork *> scheduler_;
 
@@ -385,7 +393,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       *ppPipeline = iter->second.get();
       return;
     }
-    auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc)});
+    auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc, pso_cache_, pso_cache_mutex_)});
     if (!inserted) {
       D3D11_ASSERT(0 && "duplicated graphics pipeline");
     } else {
@@ -447,12 +455,63 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     *ppPipeline = iter->second.get();
   }
 
+  void save_cache(std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>>& cache, const std::string& path) {
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) return;
+
+    uint32_t count = cache.size();
+    f.write(reinterpret_cast<const char*>(&count), sizeof(count));
+
+    WMT::Reference<WMT::Error> err;
+    for (auto& [hash, archive] : cache) {
+        f.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
+        archive.serialize((WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin").c_str(), err);
+    }
+  }
+
+  void load_cache(std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>>& cache, const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return;
+
+    uint32_t count = 0;
+    f.read(reinterpret_cast<char*>(&count), sizeof(count));
+    cache.reserve(count * 2 < 100 ? 100 : count * 2);
+
+    for (uint32_t i = 0; i < count; i++) {
+        size_t hash = 0;
+        f.read(reinterpret_cast<char*>(&hash), sizeof(hash));
+
+        if (!f.good()) {
+            break;
+        }
+
+        std::string bin_path = WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin";
+        WMT::Reference<WMT::Error> err;
+        WMT::Reference<WMT::BinaryArchive> archive = device->GetMTLDevice().newBinaryArchive(bin_path.c_str(), err);
+
+        if (archive) {
+          cache[hash] = archive;
+        }
+    }
+    
+
+  }
+
 public:
   PipelineCache(MTLD3D11Device *pDevice) :
       scache_(ShaderCache::getInstance(pDevice->GetDXMTDevice().metalVersion())),
       device(pDevice),
       blend_states(pDevice),
-      so_layouts(pDevice) {};
+      so_layouts(pDevice) {
+    load_cache(pso_cache_, WMT::GetCacheDir() + "cache_map.bin");
+    original_pso_cache_size_ = pso_cache_.size();
+  };
+
+  ~PipelineCache() {
+    if (original_pso_cache_size_ != pso_cache_.size()) {
+      save_cache(pso_cache_, WMT::GetCacheDir() + "cache_map.bin");
+    }
+  }
 };
 
 std::unique_ptr<MTLD3D11PipelineCacheBase>

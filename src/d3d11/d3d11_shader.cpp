@@ -28,6 +28,10 @@ public:
     return ret;
   }
 
+  const std::string& GetFuncName() {
+    return func_name;
+  }
+
   ThreadpoolWork *
   RunThreadpoolWork() {
     auto pool = WMT::MakeAutoreleasePool();

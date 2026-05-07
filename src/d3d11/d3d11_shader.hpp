@@ -200,6 +200,7 @@ public:
   return false if it's not ready
    */
   virtual bool GetShader(MTL_COMPILED_SHADER *pShaderData) = 0;
+  virtual const std::string& GetFuncName() = 0;
 };
 
 class Shader {

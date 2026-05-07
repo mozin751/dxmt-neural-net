@@ -782,23 +782,23 @@ struct WMTRenderPipelineBlendInfo {
 };
 
 struct WMTRenderPipelineInfo {
-  struct WMTColorAttachmentBlendInfo colors[8];
-  bool alpha_to_coverage_enabled;
-  bool logic_operation_enabled;
-  enum WMTLogicOperation logic_operation;
-  bool rasterization_enabled;
-  uint8_t raster_sample_count;
-  enum WMTPixelFormat depth_pixel_format;
-  enum WMTPixelFormat stencil_pixel_format;
-  obj_handle_t vertex_function;
-  obj_handle_t fragment_function;
-  uint32_t immutable_vertex_buffers;
-  uint32_t immutable_fragment_buffers;
-  enum WMTPrimitiveTopologyClass input_primitive_topology;
-  enum WMTTessellationPartitionMode tessellation_partition_mode;
-  uint8_t max_tessellation_factor;
-  enum WMTWinding tessellation_output_winding_order;
-  enum WMTTessellationFactorStepFunction tessellation_factor_step;
+  struct WMTColorAttachmentBlendInfo colors[8]; // PSO
+  bool alpha_to_coverage_enabled; // PSO
+  bool logic_operation_enabled; // PSO
+  enum WMTLogicOperation logic_operation; // PSO
+  bool rasterization_enabled; // PSO
+  uint8_t raster_sample_count; // PSO
+  enum WMTPixelFormat depth_pixel_format; // PSO
+  enum WMTPixelFormat stencil_pixel_format; // PSO
+  obj_handle_t vertex_function; // PSO
+  obj_handle_t fragment_function; // PSO
+  uint32_t immutable_vertex_buffers; // PSO
+  uint32_t immutable_fragment_buffers; // PSO
+  enum WMTPrimitiveTopologyClass input_primitive_topology; // PSO
+  enum WMTTessellationPartitionMode tessellation_partition_mode; // PSO
+  uint8_t max_tessellation_factor; // PSO
+  enum WMTWinding tessellation_output_winding_order; // PSO
+  enum WMTTessellationFactorStepFunction tessellation_factor_step; // PSO
   obj_handle_t binary_archive_for_serialization;
   struct WMTConstMemoryPointer binary_archives_for_lookup;
   uint8_t num_binary_archives_for_lookup;
@@ -1846,6 +1846,8 @@ WINEMETAL_API obj_handle_t MTLDevice_newSharedEventWithMachPort(obj_handle_t dev
 
 WINEMETAL_API uint64_t MTLDevice_registryID(obj_handle_t device);
 
-WINEMETAL_API bool MTLSharedEvent_waitUntilSignaledValue(obj_handle_t event, uint64_t value, uint64_t timeout);
+WINEMETAL_API bool MTLSharedEvent_waitUntilSignaledValue(obj_handle_t event, uint64_t value, uint64_t timeout);\
+
+WINEMETAL_API void WMTGetCacheDir(char *buffer, uint64_t buffer_size);
 
 #endif
