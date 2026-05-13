@@ -13,10 +13,14 @@
 #include <cstring>
 #include <shared_mutex>
 #include <unordered_map>
-#include<unordered_set>
+#include <unordered_set>
 #include <fstream>
+#include <optional>
 
 namespace dxmt {
+
+static constexpr uint32_t kShaderPairMagic   = 0x53485052;
+static constexpr size_t kHashStringLen = 8;
 
 class MTLD3D11InputLayout final
     : public MTLD3D11DeviceChild<IMTLD3D11InputLayout> {
@@ -197,6 +201,14 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>> pso_cache_;
   std::mutex pso_cache_mutex_;
   size_t original_pso_cache_size_;
+
+  std::unordered_map<Sha1Digest, MTL_GRAPHICS_PIPELINE_DESC> shader_to_config_;
+  
+  std::unordered_map<std::string, std::unordered_set<std::optional<std::string>>> vs_to_ps_map_;
+  size_t original_vs_ps_map_size_;
+  
+  std::unordered_map<std::string, std::unordered_set<std::string>> ps_to_vs_map_;
+  size_t original_ps_vs_map_size_;
 
   task_scheduler<ThreadpoolWork *> scheduler_;
 
@@ -388,6 +400,20 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   void GetGraphicsPipeline(MTL_GRAPHICS_PIPELINE_DESC *pDesc,
                            MTLCompiledGraphicsPipeline **ppPipeline) override {
     std::lock_guard<dxmt::mutex> lock(mutex_);
+        
+    Sha1HashState h;
+    auto vs_hash = pDesc->VertexShader->sha1();
+    Sha1Digest ps_hash;
+    h.update(vs_hash);
+    if (pDesc->PixelShader) {
+      ps_hash = pDesc->PixelShader->sha1();
+      h.update(ps_hash);
+      ps_to_vs_map_[ps_hash.string().substr(0, 8)].insert(vs_hash.string().substr(0, 8));
+    }
+    auto hash_final = h.final();
+
+    shader_to_config_[hash_final] = *pDesc;
+    vs_to_ps_map_[vs_hash.string().substr(0, 8)].insert(pDesc->PixelShader ? std::optional<std::string>(ps_hash.string().substr(0, 8)) : std::nullopt);
 
     if (auto iter = pipelines_.find(*pDesc); iter != pipelines_.end()) {
       *ppPipeline = iter->second.get();
@@ -464,9 +490,129 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 
     WMT::Reference<WMT::Error> err;
     for (auto& [hash, archive] : cache) {
-        f.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
-        archive.serialize((WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin").c_str(), err);
+      f.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
+      archive.serialize((WMT::GetCacheDir() + "/metal_bin_archives/" + std::to_string(hash) + ".bin").c_str(), err);
     }
+  }
+
+    template <typename T>
+  bool writeShaderPairMap(
+      const std::unordered_map<std::string, std::unordered_set<T>>& map,
+      const std::string& path)
+  {
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f)
+      return false;
+
+    auto write = [&](const void* data, size_t size) {
+      f.write(reinterpret_cast<const char*>(data), size);
+    };
+
+    auto writeStr = [&](const std::string& s) {
+      write(s.data(), kHashStringLen);
+    };
+
+    write(&kShaderPairMagic, sizeof(kShaderPairMagic));
+
+    uint32_t mapSize = static_cast<uint32_t>(map.size());
+    write(&mapSize, sizeof(mapSize));
+
+    for (const auto& [vs, psSet] : map) {
+      writeStr(vs);
+
+      uint32_t setSize = static_cast<uint32_t>(psSet.size());
+      write(&setSize, sizeof(setSize));
+
+      for (const auto& ps : psSet) {
+        if constexpr (std::is_same_v<T, std::optional<std::string>>) {
+          uint8_t hasValue = ps.has_value() ? 1 : 0;
+          write(&hasValue, sizeof(hasValue));
+
+          if (ps.has_value())
+              writeStr(*ps);
+        } else {
+          uint8_t hasValue = 1;
+          write(&hasValue, sizeof(hasValue));
+          writeStr(ps);
+        }
+      }
+    }
+
+    return f.good();
+  }
+
+  template <typename T>
+  bool readShaderPairMap(
+      std::unordered_map<std::string, std::unordered_set<T>>& map,
+      const std::string& path)
+  {
+    std::ifstream f(path, std::ios::binary);
+    if (!f)
+      return false;
+
+    auto read = [&](void* data, size_t size) -> bool {
+      f.read(reinterpret_cast<char*>(data), size);
+      return f.good();
+    };
+
+    auto readStr = [&](std::string& s) -> bool {
+      s.resize(kHashStringLen);
+      return read(s.data(), kHashStringLen);
+    };
+
+    uint32_t magic;
+    if (!read(&magic, sizeof(magic)) ||
+      magic != kShaderPairMagic)
+      return false;
+
+    uint32_t mapSize;
+    if (!read(&mapSize, sizeof(mapSize)))
+      return false;
+
+    map.clear();
+    map.reserve(mapSize);
+
+    for (uint32_t i = 0; i < mapSize; i++) {
+      std::string vs;
+      if (!readStr(vs))
+        return false;
+
+      uint32_t setSize;
+      if (!read(&setSize, sizeof(setSize)))
+        return false;
+
+      auto& psSet = map[vs];
+      psSet.reserve(setSize);
+
+      for (uint32_t j = 0; j < setSize; j++) {
+        uint8_t hasValue;
+        if (!read(&hasValue, sizeof(hasValue)))
+          return false;
+
+        if constexpr (std::is_same_v<T, std::optional<std::string>>) {
+          if (hasValue) {
+              std::string ps;
+              if (!readStr(ps))
+                  return false;
+
+              psSet.insert(std::move(ps));
+          } else {
+              psSet.insert(std::nullopt);
+          }
+        } else {
+          if (!hasValue)
+            return false; // invalid for non-optional version
+
+          std::string ps;
+          if (!readStr(ps))
+            return false;
+
+          psSet.insert(std::move(ps));
+        }
+      }
+    }
+
+    return true;
   }
 
   void load_cache(std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>>& cache, const std::string& path) {
@@ -504,12 +650,24 @@ public:
       blend_states(pDevice),
       so_layouts(pDevice) {
     load_cache(pso_cache_, WMT::GetCacheDir() + "cache_map.bin");
+    readShaderPairMap(vs_to_ps_map_, WMT::GetCacheDir() + "vs_to_ps_map.bin");
+    readShaderPairMap(ps_to_vs_map_, WMT::GetCacheDir() + "ps_to_vs_map.bin");
     original_pso_cache_size_ = pso_cache_.size();
+    original_vs_ps_map_size_ = vs_to_ps_map_.size();
+    original_ps_vs_map_size_ = ps_to_vs_map_.size();
   };
 
   ~PipelineCache() {
     if (original_pso_cache_size_ != pso_cache_.size()) {
       save_cache(pso_cache_, WMT::GetCacheDir() + "cache_map.bin");
+    }
+
+    if (original_vs_ps_map_size_ != vs_to_ps_map_.size()) {
+      writeShaderPairMap(vs_to_ps_map_, WMT::GetCacheDir() + "vs_to_ps_map.bin");
+    }
+
+    if (original_ps_vs_map_size_ != ps_to_vs_map_.size()) {
+      writeShaderPairMap(ps_to_vs_map_, WMT::GetCacheDir() + "ps_to_vs_map.bin");
     }
   }
 };
