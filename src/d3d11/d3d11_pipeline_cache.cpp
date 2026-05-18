@@ -21,6 +21,8 @@ namespace dxmt {
 
 static constexpr uint32_t kShaderPairMagic   = 0x53485052;
 static constexpr size_t kHashStringLen = 8;
+constexpr uint32_t kCacheMagic   = 0x44584D43;
+constexpr uint32_t kCacheVersion = 1;
 
 class MTLD3D11InputLayout final
     : public MTLD3D11DeviceChild<IMTLD3D11InputLayout> {
@@ -202,7 +204,8 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   std::mutex pso_cache_mutex_;
   size_t original_pso_cache_size_;
 
-  std::unordered_map<Sha1Digest, MTL_GRAPHICS_PIPELINE_DESC> shader_to_config_;
+  std::unordered_map<Sha1Digest, MTL_GRAPHICS_PIPELINE_DESC> descriptor_shader_map_;
+  size_t original_descriptor_cache_size_;
   
   std::unordered_map<std::string, std::unordered_set<std::optional<std::string>>> vs_to_ps_map_;
   size_t original_vs_ps_map_size_;
@@ -412,7 +415,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     }
     auto hash_final = h.final();
 
-    shader_to_config_[hash_final] = *pDesc;
+    descriptor_shader_map_[hash_final] = *pDesc;
     vs_to_ps_map_[vs_hash.string().substr(0, 8)].insert(pDesc->PixelShader ? std::optional<std::string>(ps_hash.string().substr(0, 8)) : std::nullopt);
 
     if (auto iter = pipelines_.find(*pDesc); iter != pipelines_.end()) {
@@ -495,7 +498,97 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     }
   }
 
-    template <typename T>
+  template <typename T>
+  static void write_pod(std::ostream& os, const T& v) {
+      static_assert(std::is_trivially_copyable_v<T>);
+      os.write(reinterpret_cast<const char*>(&v), sizeof(T));
+  }
+
+  template <typename T>
+  static bool read_pod(std::istream& is, T& v) {
+      static_assert(std::is_trivially_copyable_v<T>);
+      is.read(reinterpret_cast<char*>(&v), sizeof(T));
+      return is.good();
+  }
+
+  static void serialise_desc(std::ostream& os,
+                           const MTL_GRAPHICS_PIPELINE_DESC& desc) {
+    write_pod(os, desc.NumColorAttachments);
+    write_pod(os, desc.ColorAttachmentFormats);
+    write_pod(os, desc.DepthStencilFormat);
+    write_pod(os, desc.TopologyClass);
+    write_pod(os, desc.RasterizationEnabled);
+    write_pod(os, desc.SampleCount);
+    write_pod(os, desc.GSStripTopology);
+    write_pod(os, desc.IndexBufferFormat);
+    write_pod(os, desc.SampleMask);
+    write_pod(os, desc.GSPassthrough);
+
+    const bool has_blend = (desc.BlendState != nullptr);
+    write_pod(os, has_blend);
+    if (has_blend) {
+      D3D11_BLEND_DESC1 bd;
+      desc.BlendState->GetDesc1(&bd);
+      write_pod(os, bd);
+    }
+
+    const bool has_il = (desc.InputLayout != nullptr);
+    write_pod(os, has_il);
+    if (has_il) {
+      MTL_SHADER_INPUT_LAYOUT_ELEMENT_DESC* elements = nullptr;
+      const uint32_t count = desc.InputLayout->input_layout_element(&elements);
+      const uint32_t mask  = desc.InputLayout->input_slot_mask();
+
+      write_pod(os, mask);
+      write_pod(os, count);
+      os.write(reinterpret_cast<const char*>(elements),
+              sizeof(MTL_SHADER_INPUT_LAYOUT_ELEMENT_DESC) * count);
+    }
+
+    const bool has_so = (desc.SOLayout != nullptr);
+    write_pod(os, has_so);
+    if (has_so) {
+        MTL_SHADER_STREAM_OUTPUT_ELEMENT_DESC* elements = nullptr;
+        uint32_t strides[4] = {};
+        const uint32_t count = desc.SOLayout->GetStreamOutputElements(&elements, strides);
+        const uint32_t rasterized_stream = desc.SOLayout->RasterizedStream();
+
+        write_pod(os, strides);
+        write_pod(os, rasterized_stream);
+        write_pod(os, count);
+        os.write(reinterpret_cast<const char*>(elements),
+                sizeof(MTL_SHADER_STREAM_OUTPUT_ELEMENT_DESC) * count);
+    }
+  }
+
+  void serialise_map(std::ostream& os,
+                   const std::unordered_map<Sha1Digest, MTL_GRAPHICS_PIPELINE_DESC>& map) {
+    write_pod(os, kCacheMagic);
+    write_pod(os, kCacheVersion);
+    write_pod(os, static_cast<uint32_t>(map.size()));
+    for (const auto& [sha1, desc] : map) {
+      write_pod(os, sha1);
+      serialise_desc(os, desc);
+    }
+  }
+
+  void writeCacheToDisk(const std::string& path) {
+    std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
+    if (!ofs) {
+        ERR("Failed to write to pipeline disk cache");
+        return;
+    }
+
+    std::unordered_map<Sha1Digest, MTL_GRAPHICS_PIPELINE_DESC> snapshot;
+    {
+      // TODO: Lock
+      snapshot = descriptor_shader_map_;
+    }
+
+    serialise_map(ofs, snapshot);
+  }
+
+  template <typename T>
   bool writeShaderPairMap(
       const std::unordered_map<std::string, std::unordered_set<T>>& map,
       const std::string& path)
@@ -539,6 +632,128 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     }
 
     return f.good();
+  }
+
+  bool deserialise_desc(std::istream& is, MTL_GRAPHICS_PIPELINE_DESC& desc) {
+    if (!read_pod(is, desc.NumColorAttachments))   return false;
+    if (!read_pod(is, desc.ColorAttachmentFormats)) return false;
+    if (!read_pod(is, desc.DepthStencilFormat))    return false;
+    if (!read_pod(is, desc.TopologyClass))         return false;
+    if (!read_pod(is, desc.RasterizationEnabled))  return false;
+    if (!read_pod(is, desc.SampleCount))           return false;
+    if (!read_pod(is, desc.GSStripTopology))       return false;
+    if (!read_pod(is, desc.IndexBufferFormat))     return false;
+    if (!read_pod(is, desc.SampleMask))            return false;
+    if (!read_pod(is, desc.GSPassthrough))         return false;
+
+    // --- BlendState ---
+    bool has_blend = false;
+    if (!read_pod(is, has_blend)) return false;
+    if (has_blend) {
+      D3D11_BLEND_DESC1 bd;
+      if (!read_pod(is, bd)) return false;
+
+      IMTLD3D11BlendState* bs = nullptr;
+      if (FAILED(blend_states.CreateStateObject(&bd, &bs))) return false;
+      desc.BlendState = bs;
+      bs->Release();
+    }
+
+    // --- InputLayout ---
+    bool has_il = false;
+    if (!read_pod(is, has_il)) return false;
+    if (has_il) {
+      uint32_t mask = 0;
+      uint32_t count = 0;
+      if (!read_pod(is, mask))  return false;
+      if (!read_pod(is, count)) return false;
+
+      constexpr uint32_t kMaxElements = 64;
+      if (count > kMaxElements) return false;
+
+      std::vector<MTL_SHADER_INPUT_LAYOUT_ELEMENT_DESC> elements(count);
+      if (count > 0) {
+        is.read(reinterpret_cast<char*>(elements.data()),
+                sizeof(MTL_SHADER_INPUT_LAYOUT_ELEMENT_DESC) * count);
+        if (!is.good()) return false;
+      }
+
+      std::lock_guard<dxmt::mutex> lock(mutex_ia_);
+
+      auto it = input_layouts.find(elements);
+      if (it == input_layouts.end()) {
+        auto key = elements;  // separate copy for the key
+        it = input_layouts.emplace(
+            std::move(key),
+            std::make_unique<CachedInputLayout>(std::move(elements), mask)
+        ).first;
+      }
+      desc.InputLayout = it->second.get();
+    }
+
+    // --- SOLayout ---
+    bool has_so = false;
+    if (!read_pod(is, has_so)) return false;
+    if (has_so) {
+      uint32_t strides[4] = {};
+      uint32_t rasterized_stream = 0;
+      uint32_t count = 0;
+      if (!read_pod(is, strides))           return false;
+      if (!read_pod(is, rasterized_stream)) return false;
+      if (!read_pod(is, count))             return false;
+
+      constexpr uint32_t kMaxElements = 128;
+      if (count > kMaxElements) return false;
+
+      std::vector<MTL_SHADER_STREAM_OUTPUT_ELEMENT_DESC> elements(count);
+      if (count > 0) {
+        is.read(reinterpret_cast<char*>(elements.data()),
+                sizeof(MTL_SHADER_STREAM_OUTPUT_ELEMENT_DESC) * count);
+        if (!is.good()) return false;
+      }
+
+      MTL_STREAM_OUTPUT_DESC so_desc;
+      std::memcpy(so_desc.Strides, strides, sizeof(strides));
+      so_desc.Elements = std::move(elements);
+      so_desc.RasterizedStream = rasterized_stream;
+
+      std::lock_guard<dxmt::mutex> lock(mutex_so_);
+
+      IMTLD3D11StreamOutputLayout* so = nullptr;
+      if (FAILED(so_layouts.CreateStateObject(&so_desc, &so))) return false;
+      desc.SOLayout = so;
+      so->Release();   // cache owns the lifetime; same pattern as blend state
+    }
+
+    return true;
+  }
+
+  void loadCacheFromDisk(const std::string& path) {
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs) {
+      return; // no cache yet, first run — not an error
+    }
+
+    uint32_t magic = 0, version = 0, count = 0;
+    if (!read_pod(ifs, magic)   || magic   != kCacheMagic)   return;
+    if (!read_pod(ifs, version) || version != kCacheVersion) return;
+    if (!read_pod(ifs, count))                                return;
+
+    std::unordered_map<Sha1Digest, MTL_GRAPHICS_PIPELINE_DESC> loaded;
+    loaded.reserve(count);
+
+    for (uint32_t i = 0; i < count; ++i) {
+      Sha1Digest sha1;
+      if (!read_pod(ifs, sha1)) return;
+
+      MTL_GRAPHICS_PIPELINE_DESC desc{};
+      // if (!deserialise_desc(ifs, desc)) return;
+
+      loaded.emplace(sha1, desc);
+    }
+
+    // TODO: Lock
+    descriptor_shader_map_ = std::move(loaded);
   }
 
   template <typename T>
@@ -601,7 +816,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
           }
         } else {
           if (!hasValue)
-            return false; // invalid for non-optional version
+            return false;
 
           std::string ps;
           if (!readStr(ps))
@@ -652,6 +867,7 @@ public:
     load_cache(pso_cache_, WMT::GetCacheDir() + "cache_map.bin");
     readShaderPairMap(vs_to_ps_map_, WMT::GetCacheDir() + "vs_to_ps_map.bin");
     readShaderPairMap(ps_to_vs_map_, WMT::GetCacheDir() + "ps_to_vs_map.bin");
+    loadCacheFromDisk(WMT::GetCacheDir() + "shader_descriptor_map.bin");
     original_pso_cache_size_ = pso_cache_.size();
     original_vs_ps_map_size_ = vs_to_ps_map_.size();
     original_ps_vs_map_size_ = ps_to_vs_map_.size();
@@ -668,6 +884,10 @@ public:
 
     if (original_ps_vs_map_size_ != ps_to_vs_map_.size()) {
       writeShaderPairMap(ps_to_vs_map_, WMT::GetCacheDir() + "ps_to_vs_map.bin");
+    }
+
+    if (original_descriptor_cache_size_ != descriptor_shader_map_.size()) {
+      writeCacheToDisk(WMT::GetCacheDir() + "shader_descriptor_map.bin");
     }
   }
 };
