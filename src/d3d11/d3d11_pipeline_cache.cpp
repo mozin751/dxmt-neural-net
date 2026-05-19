@@ -19,10 +19,11 @@
 
 namespace dxmt {
 
-static constexpr uint32_t kShaderPairMagic   = 0x53485052;
-static constexpr size_t kHashStringLen = 8;
+constexpr uint32_t kShaderPairMagic   = 0x53485052;
+constexpr size_t kHashStringLen = 8;
 constexpr uint32_t kCacheMagic   = 0x44584D43;
 constexpr uint32_t kCacheVersion = 1;
+constexpr size_t kDescKeyLen = 17;
 
 class MTLD3D11InputLayout final
     : public MTLD3D11DeviceChild<IMTLD3D11InputLayout> {
@@ -204,7 +205,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   std::mutex pso_cache_mutex_;
   size_t original_pso_cache_size_;
 
-  std::unordered_map<Sha1Digest, MTL_GRAPHICS_PIPELINE_DESC> descriptor_shader_map_;
+  std::unordered_map<std::string, std::unordered_set<MTL_GRAPHICS_PIPELINE_DESC>> descriptor_shader_map_;
   size_t original_descriptor_cache_size_;
   
   std::unordered_map<std::string, std::unordered_set<std::optional<std::string>>> vs_to_ps_map_;
@@ -404,19 +405,15 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
                            MTLCompiledGraphicsPipeline **ppPipeline) override {
     std::lock_guard<dxmt::mutex> lock(mutex_);
         
-    Sha1HashState h;
-    auto vs_hash = pDesc->VertexShader->sha1();
-    Sha1Digest ps_hash;
-    h.update(vs_hash);
+    auto vs_name = pDesc->VertexShader->sha1().string().substr(0, 8);
+    std::string ps_name = "________";
     if (pDesc->PixelShader) {
-      ps_hash = pDesc->PixelShader->sha1();
-      h.update(ps_hash);
-      ps_to_vs_map_[ps_hash.string().substr(0, 8)].insert(vs_hash.string().substr(0, 8));
+      ps_name = pDesc->PixelShader->sha1().string().substr(0, 8);
+      ps_to_vs_map_[ps_name].insert(vs_name);
     }
-    auto hash_final = h.final();
 
-    descriptor_shader_map_[hash_final] = *pDesc;
-    vs_to_ps_map_[vs_hash.string().substr(0, 8)].insert(pDesc->PixelShader ? std::optional<std::string>(ps_hash.string().substr(0, 8)) : std::nullopt);
+    descriptor_shader_map_[str::format(vs_name, "/", ps_name)].insert(*pDesc);
+    vs_to_ps_map_[vs_name].insert(pDesc->PixelShader ? std::optional<std::string>(ps_name) : std::nullopt);
 
     if (auto iter = pipelines_.find(*pDesc); iter != pipelines_.end()) {
       *ppPipeline = iter->second.get();
@@ -562,13 +559,17 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   }
 
   void serialise_map(std::ostream& os,
-                   const std::unordered_map<Sha1Digest, MTL_GRAPHICS_PIPELINE_DESC>& map) {
+                 const std::unordered_map<std::string, std::unordered_set<MTL_GRAPHICS_PIPELINE_DESC>>& map) {
     write_pod(os, kCacheMagic);
     write_pod(os, kCacheVersion);
     write_pod(os, static_cast<uint32_t>(map.size()));
-    for (const auto& [sha1, desc] : map) {
-      write_pod(os, sha1);
-      serialise_desc(os, desc);
+    for (const auto& [key, descs] : map) {
+      if (key.size() != kDescKeyLen) continue;
+      os.write(key.data(), kDescKeyLen);
+      write_pod(os, static_cast<uint32_t>(descs.size()));
+      for (const auto& desc : descs) {
+        serialise_desc(os, desc);
+      }
     }
   }
 
@@ -579,7 +580,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
         return;
     }
 
-    std::unordered_map<Sha1Digest, MTL_GRAPHICS_PIPELINE_DESC> snapshot;
+    std::unordered_map<std::string, std::unordered_set<MTL_GRAPHICS_PIPELINE_DESC>> snapshot;
     {
       // TODO: Lock
       snapshot = descriptor_shader_map_;
@@ -739,17 +740,27 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     if (!read_pod(ifs, version) || version != kCacheVersion) return;
     if (!read_pod(ifs, count))                                return;
 
-    std::unordered_map<Sha1Digest, MTL_GRAPHICS_PIPELINE_DESC> loaded;
+    std::unordered_map<std::string, std::unordered_set<MTL_GRAPHICS_PIPELINE_DESC>> loaded;
     loaded.reserve(count);
 
     for (uint32_t i = 0; i < count; ++i) {
-      Sha1Digest sha1;
-      if (!read_pod(ifs, sha1)) return;
+      std::string key(kDescKeyLen, '\0');
+      ifs.read(key.data(), kDescKeyLen);
+      if (!ifs.good()) return;
 
-      MTL_GRAPHICS_PIPELINE_DESC desc{};
-      // if (!deserialise_desc(ifs, desc)) return;
+      uint32_t desc_count = 0;
+      if (!read_pod(ifs, desc_count)) return;
 
-      loaded.emplace(sha1, desc);
+      constexpr uint32_t kMaxDescsPerKey = 4096;
+      if (desc_count > kMaxDescsPerKey) return;
+
+      auto& set = loaded[std::move(key)];
+      set.reserve(desc_count);
+      for (uint32_t j = 0; j < desc_count; ++j) {
+        MTL_GRAPHICS_PIPELINE_DESC desc{};
+        if (!deserialise_desc(ifs, desc)) return;
+        set.insert(std::move(desc));
+      }
     }
 
     // TODO: Lock
