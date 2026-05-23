@@ -179,6 +179,7 @@ public:
   WMT::Reference<WMT::SharedEvent> event;
   std::uint64_t current_event_seq_id = 0;
   FrameStatisticsContainer statistics;
+  SlidingMissCounter pipeline_cache_misses_window;
   ResourceInitializer initializer;
 
   CommandQueue(WMT::Device device);

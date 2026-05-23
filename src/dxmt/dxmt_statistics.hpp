@@ -35,6 +35,28 @@ struct ScalerInfo {
   bool motion_vector_highres;
 };
 
+class SlidingMissCounter {
+    static constexpr size_t kWindowFrames = 600;
+    std::array<uint32_t, kWindowFrames> per_frame_{};
+    std::atomic<uint32_t> current_frame_misses_{0};
+
+public:
+    // producer: bump on each miss
+    void record_miss() {
+        current_frame_misses_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // call once per frame at present time; commits this frame's count
+    // and returns the window total
+    uint32_t advance_and_total(uint64_t frame_id) {
+        per_frame_[frame_id % kWindowFrames] =
+            current_frame_misses_.exchange(0, std::memory_order_relaxed);
+        uint32_t total = 0;
+        for (auto v : per_frame_) total += v;
+        return total;
+    }
+};
+
 struct FrameStatistics {
   Flags<FeatureCompatibility> compatibility_flags;
   uint32_t command_buffer_count = 0;
@@ -50,6 +72,7 @@ struct FrameStatistics {
   uint32_t blit_pass_count = 0;
   uint32_t event_stall = 0;
   uint32_t latency = 0;
+  uint32_t pipeline_cache_hits = 0;
   clock::duration encode_prepare_interval{};
   clock::duration encode_flush_interval{};
   clock::duration drawable_blocking_interval{};
@@ -72,6 +95,7 @@ struct FrameStatistics {
     blit_pass_count = 0;
     event_stall = 0;
     latency = 0;
+    pipeline_cache_hits = 0;
     encode_prepare_interval = {};
     encode_flush_interval = {};
     drawable_blocking_interval = {};

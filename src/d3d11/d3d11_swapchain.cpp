@@ -788,7 +788,8 @@ public:
         ctx.upscale(backbuffer, upscaled, scaler);
         ctx.present(upscaled, presenter, vsync_duration, state.metadata);
         ReleaseSemaphore(present_semaphore_, 1, nullptr);
-        this->UpdateStatistics(ctx.queue().statistics, ctx.currentFrameId());
+        uint32_t window_misses = ctx.queue().pipeline_cache_misses_window.advance_and_total(ctx.currentFrameId());
+        this->UpdateStatistics(ctx.queue().statistics, window_misses, ctx.currentFrameId());
       });
     } else {
       chunk->emitcc([
@@ -798,7 +799,8 @@ public:
       ](ArgumentEncodingContext &ctx) mutable {
         ctx.present(backbuffer, presenter, vsync_duration, state.metadata);
         ReleaseSemaphore(present_semaphore_, 1, nullptr);
-        this->UpdateStatistics(ctx.queue().statistics, ctx.currentFrameId());
+        uint32_t window_misses = ctx.queue().pipeline_cache_misses_window.advance_and_total(ctx.currentFrameId());
+        this->UpdateStatistics(ctx.queue().statistics, window_misses, ctx.currentFrameId());
       });
     }
     device_context_->Commit();
@@ -810,7 +812,7 @@ public:
     return hr;
   };
 
-  void UpdateStatistics(const FrameStatisticsContainer& statistics, uint64_t frame_id) {
+  void UpdateStatistics(const FrameStatisticsContainer& statistics, uint32_t window_misses, uint64_t frame_id) {
     hud.begin();
     auto &frame = statistics.at(frame_id - 1); // show the previous one frame statistics
     auto &average = statistics.average();
@@ -888,6 +890,12 @@ public:
         ));
       }
     }
+
+    hud.printLine(std::format(
+        "PSO Cache: {:3} hit / {:3} miss (600f)",
+        std::min(frame.pipeline_cache_hits, 999u),
+        std::min(window_misses, 999u)
+    ));
     hud.end();
   }
 

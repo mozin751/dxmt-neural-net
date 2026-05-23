@@ -36,7 +36,7 @@ public:
 
   virtual HRESULT CreateGraphicsPipeline(MTL_GRAPHICS_PIPELINE_DESC * pDesc,
                                          MTLCompiledGraphicsPipeline *
-                                             *ppPipeline) = 0;
+                                             *ppPipeline, bool* pWasCached = nullptr) = 0;
 
   virtual HRESULT CreateComputePipeline(MTL_COMPUTE_PIPELINE_DESC * pDesc,
                                         MTLCompiledComputePipeline *

@@ -120,14 +120,10 @@ public:
       }
     }
 
-    auto start = std::chrono::high_resolution_clock::now();
-    WMT::Reference<WMT::Error> error;
-    state_ = device_->GetMTLDevice().newRenderPipelineState(info, error);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    state_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
 
     if (state_ == nullptr) {
-      ERR("Failed to create PSO: ", error.description().getUTF8String());
+      ERR("Failed to create PSO: ", err.description().getUTF8String());
       return this;
     }
     

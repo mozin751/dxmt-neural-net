@@ -24,7 +24,7 @@ public:
   ) = 0;
   virtual HRESULT AddBlendState(const D3D11_BLEND_DESC1 *pBlendDesc, IMTLD3D11BlendState **ppBlendState) = 0;
   virtual void
-  GetGraphicsPipeline(MTL_GRAPHICS_PIPELINE_DESC *pPipelineDesc, MTLCompiledGraphicsPipeline **ppPipeline) = 0;
+  GetGraphicsPipeline(MTL_GRAPHICS_PIPELINE_DESC *pPipelineDesc, MTLCompiledGraphicsPipeline **ppPipeline, bool *pWasCached = nullptr, bool fromCache = false) = 0;
   virtual void GetGeometryPipeline(MTL_GRAPHICS_PIPELINE_DESC *pDesc, MTLCompiledGeometryPipeline **ppPipeline) = 0;
   virtual void
   GetTessellationPipeline(MTL_GRAPHICS_PIPELINE_DESC *pDesc, MTLCompiledTessellationMeshPipeline **ppPipeline) = 0;
