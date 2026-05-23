@@ -4454,7 +4454,14 @@ public:
     MTL_GRAPHICS_PIPELINE_DESC pipelineDesc;
     InitializeGraphicsPipelineDesc<IndexedDraw>(pipelineDesc);
 
-    device->CreateGraphicsPipeline(&pipelineDesc, &pipeline);
+    bool was_cached = false;
+    device->CreateGraphicsPipeline(&pipelineDesc, &pipeline, &was_cached);
+
+    EmitST([was_cached](ArgumentEncodingContext &enc) {
+        if (was_cached) enc.currentFrameStatistics().pipeline_cache_hits++;
+        else             enc.queue().pipeline_cache_misses_window.record_miss();
+    });
+    
     EmitST([pso = std::move(pipeline)](ArgumentEncodingContext& enc) {
       MTL_COMPILED_GRAPHICS_PIPELINE GraphicsPipeline{};
       pso->GetPipeline(&GraphicsPipeline); // may block

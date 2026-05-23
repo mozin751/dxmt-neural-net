@@ -1007,8 +1007,8 @@ public:
 
   HRESULT
   CreateGraphicsPipeline(MTL_GRAPHICS_PIPELINE_DESC *pDesc,
-                         MTLCompiledGraphicsPipeline **ppPipeline) override {
-    pipeline_cache_->GetGraphicsPipeline(pDesc, ppPipeline);
+                         MTLCompiledGraphicsPipeline **ppPipeline, bool* pWasCached = nullptr) override {
+    pipeline_cache_->GetGraphicsPipeline(pDesc, ppPipeline, pWasCached);
     return S_OK;
   };
 

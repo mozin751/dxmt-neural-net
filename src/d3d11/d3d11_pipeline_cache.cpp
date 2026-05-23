@@ -24,6 +24,7 @@ constexpr size_t kHashStringLen = 8;
 constexpr uint32_t kCacheMagic   = 0x44584D43;
 constexpr uint32_t kCacheVersion = 1;
 constexpr size_t kDescKeyLen = 17;
+constexpr const char* kDefaultPSName = "________";
 
 class MTLD3D11InputLayout final
     : public MTLD3D11DeviceChild<IMTLD3D11InputLayout> {
@@ -229,6 +230,11 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   std::unordered_map<Sha1Digest, std::unique_ptr<CachedSM50Shader>> shaders_;
   std::shared_mutex mutex_shares;
 
+  std::unordered_set<std::string> encountered_pairs_;
+  std::unordered_map<std::string, Sha1Digest> vertex_shaders_;
+  std::unordered_map<std::string, Sha1Digest> pixel_shaders_;
+  dxmt::mutex mutex_add_;
+
   std::unordered_map<MTL_GRAPHICS_PIPELINE_DESC, std::unique_ptr<MTLCompiledGraphicsPipeline>> pipelines_;
   dxmt::mutex mutex_;
 
@@ -278,10 +284,21 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   virtual HRESULT AddVertexShader(const void *pBytecode,
                                   uint32_t BytecodeLength,
                                   ID3D11VertexShader **ppShader) override {
+    std::lock_guard<dxmt::mutex> lock(mutex_add_);
     auto managed_shader = CreateShader(pBytecode, BytecodeLength);
     if (!managed_shader) {
       return E_FAIL;
     }
+
+    const auto vs_name = managed_shader->sha1().string().substr(0, 8);
+    for (const auto& ps_name: vs_to_ps_map_[vs_name]) {
+      if (ps_name.has_value() && pixel_shaders_.count(ps_name.value()) == 0) continue;
+      ManagedShader ps = ps_name.has_value() ? shaders_[pixel_shaders_[ps_name.value()]].get() : nullptr;
+      PrecompileGraphicsPipelines(vs_name, ps_name, managed_shader, ps);
+    }
+
+    vertex_shaders_.emplace(vs_name, managed_shader->sha1());
+
     *ppShader =
         ref(new TShaderBase<ID3D11VertexShader, MTLD3D10VertexShader>(device, managed_shader));
     return S_OK;
@@ -289,10 +306,21 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 
   virtual HRESULT AddPixelShader(const void *pBytecode, uint32_t BytecodeLength,
                                  ID3D11PixelShader **ppShader) override {
+    std::lock_guard<dxmt::mutex> lock(mutex_add_);
     auto managed_shader = CreateShader(pBytecode, BytecodeLength);
     if (!managed_shader) {
       return E_FAIL;
     }
+   
+    const auto ps_name = managed_shader->sha1().string().substr(0, 8);
+    for (const auto& vs_name: ps_to_vs_map_[ps_name]) {
+      if (vertex_shaders_.count(vs_name) == 0) continue;
+      ManagedShader vs = shaders_[vertex_shaders_[vs_name]].get();
+      PrecompileGraphicsPipelines(vs_name, std::optional<std::string>(ps_name), vs, managed_shader);
+    }
+
+    pixel_shaders_.emplace(ps_name, managed_shader->sha1());
+
     *ppShader = ref(new TShaderBase<ID3D11PixelShader, MTLD3D10PixelShader>(device, managed_shader));
     return S_OK;
   }
@@ -401,24 +429,42 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     return blend_states.CreateStateObject(pBlendDesc, ppBlendState);
   }
 
-  void GetGraphicsPipeline(MTL_GRAPHICS_PIPELINE_DESC *pDesc,
-                           MTLCompiledGraphicsPipeline **ppPipeline) override {
-    std::lock_guard<dxmt::mutex> lock(mutex_);
-        
-    auto vs_name = pDesc->VertexShader->sha1().string().substr(0, 8);
-    std::string ps_name = "________";
-    if (pDesc->PixelShader) {
-      ps_name = pDesc->PixelShader->sha1().string().substr(0, 8);
-      ps_to_vs_map_[ps_name].insert(vs_name);
-    }
+  void PrecompileGraphicsPipelines(const std::string& vs_name, const std::optional<std::string>& ps_name, ManagedShader vs, ManagedShader ps) {
+    auto name = str::format(vs_name, "/", ps_name.value_or(kDefaultPSName));
+    if (encountered_pairs_.count(name) > 0) return;
+    encountered_pairs_.emplace(name);
 
-    descriptor_shader_map_[str::format(vs_name, "/", ps_name)].insert(*pDesc);
-    vs_to_ps_map_[vs_name].insert(pDesc->PixelShader ? std::optional<std::string>(ps_name) : std::nullopt);
+    for (auto pDesc: descriptor_shader_map_[name]) {
+      pDesc.VertexShader = vs;
+      pDesc.PixelShader = ps;
+      MTLCompiledGraphicsPipeline *dummyPipeline;
+      GetGraphicsPipeline(&pDesc, &dummyPipeline, nullptr, true);
+    }
+  }
+
+  void GetGraphicsPipeline(MTL_GRAPHICS_PIPELINE_DESC *pDesc,
+                           MTLCompiledGraphicsPipeline **ppPipeline,
+                           bool* pWasCached = nullptr, bool fromCache = false) override {
+    std::lock_guard<dxmt::mutex> lock(mutex_);
 
     if (auto iter = pipelines_.find(*pDesc); iter != pipelines_.end()) {
+      if (pWasCached) *pWasCached = true;
       *ppPipeline = iter->second.get();
       return;
     }
+    if (pWasCached) *pWasCached = fromCache;
+
+    if (!fromCache) {
+      auto vs_name = pDesc->VertexShader->sha1().string().substr(0, 8);
+      std::string ps_name = kDefaultPSName;
+      if (pDesc->PixelShader) {
+        ps_name = pDesc->PixelShader->sha1().string().substr(0, 8);
+        ps_to_vs_map_[ps_name].insert(vs_name);
+      }
+      vs_to_ps_map_[vs_name].insert(pDesc->PixelShader ? std::optional<std::string>(ps_name) : std::nullopt);
+      descriptor_shader_map_[str::format(vs_name, "/", ps_name)].insert(*pDesc);
+    }
+
     auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc, pso_cache_, pso_cache_mutex_)});
     if (!inserted) {
       D3D11_ASSERT(0 && "duplicated graphics pipeline");
@@ -889,17 +935,11 @@ public:
       save_cache(pso_cache_, WMT::GetCacheDir() + "cache_map.bin");
     }
 
-    if (original_vs_ps_map_size_ != vs_to_ps_map_.size()) {
       writeShaderPairMap(vs_to_ps_map_, WMT::GetCacheDir() + "vs_to_ps_map.bin");
-    }
 
-    if (original_ps_vs_map_size_ != ps_to_vs_map_.size()) {
       writeShaderPairMap(ps_to_vs_map_, WMT::GetCacheDir() + "ps_to_vs_map.bin");
-    }
 
-    if (original_descriptor_cache_size_ != descriptor_shader_map_.size()) {
       writeCacheToDisk(WMT::GetCacheDir() + "shader_descriptor_map.bin");
-    }
   }
 };
 
