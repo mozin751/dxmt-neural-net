@@ -207,13 +207,10 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   size_t original_pso_cache_size_;
 
   std::unordered_map<std::string, std::unordered_set<MTL_GRAPHICS_PIPELINE_DESC>> descriptor_shader_map_;
-  size_t original_descriptor_cache_size_;
-  
   std::unordered_map<std::string, std::unordered_set<std::optional<std::string>>> vs_to_ps_map_;
-  size_t original_vs_ps_map_size_;
-  
   std::unordered_map<std::string, std::unordered_set<std::string>> ps_to_vs_map_;
-  size_t original_ps_vs_map_size_;
+
+  bool dirty_maps_;
 
   task_scheduler<ThreadpoolWork *> scheduler_;
 
@@ -463,6 +460,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       }
       vs_to_ps_map_[vs_name].insert(pDesc->PixelShader ? std::optional<std::string>(ps_name) : std::nullopt);
       descriptor_shader_map_[str::format(vs_name, "/", ps_name)].insert(*pDesc);
+      dirty_maps_ = true;
     }
 
     auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc, pso_cache_, pso_cache_mutex_)});
@@ -918,6 +916,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 public:
   PipelineCache(MTLD3D11Device *pDevice) :
       scache_(ShaderCache::getInstance(pDevice->GetDXMTDevice().metalVersion())),
+      dirty_maps_(false),
       device(pDevice),
       blend_states(pDevice),
       so_layouts(pDevice) {
@@ -925,9 +924,6 @@ public:
     readShaderPairMap(vs_to_ps_map_, WMT::GetCacheDir() + "vs_to_ps_map.bin");
     readShaderPairMap(ps_to_vs_map_, WMT::GetCacheDir() + "ps_to_vs_map.bin");
     loadCacheFromDisk(WMT::GetCacheDir() + "shader_descriptor_map.bin");
-    original_pso_cache_size_ = pso_cache_.size();
-    original_vs_ps_map_size_ = vs_to_ps_map_.size();
-    original_ps_vs_map_size_ = ps_to_vs_map_.size();
   };
 
   ~PipelineCache() {
@@ -935,11 +931,11 @@ public:
       save_cache(pso_cache_, WMT::GetCacheDir() + "cache_map.bin");
     }
 
+    if (dirty_maps_) {
       writeShaderPairMap(vs_to_ps_map_, WMT::GetCacheDir() + "vs_to_ps_map.bin");
-
       writeShaderPairMap(ps_to_vs_map_, WMT::GetCacheDir() + "ps_to_vs_map.bin");
-
       writeCacheToDisk(WMT::GetCacheDir() + "shader_descriptor_map.bin");
+    }
   }
 };
 
