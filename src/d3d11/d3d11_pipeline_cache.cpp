@@ -244,6 +244,25 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   std::unordered_map<ManagedShader, std::unique_ptr<MTLCompiledComputePipeline>> pipelines_cs_;
   dxmt::mutex mutex_cs_;
 
+  struct RpsVocabHash {
+  size_t operator()(const std::tuple<UINT, std::array<WMTPixelFormat, 8>, WMTPixelFormat, uint8_t>& t) const {
+    size_t seed = 0;
+    auto hash_combine = [&seed](auto val) {
+      seed ^= std::hash<decltype(val)>{}(val) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    };
+
+    hash_combine(std::get<0>(t));
+    for (const auto& fmt : std::get<1>(t))
+      hash_combine(static_cast<std::underlying_type_t<WMTPixelFormat>>(fmt));
+    hash_combine(static_cast<std::underlying_type_t<WMTPixelFormat>>(std::get<2>(t)));
+    hash_combine(std::get<3>(t));
+
+    return seed;
+  }
+};
+
+  std::unordered_set<std::tuple<UINT, std::array<WMTPixelFormat, 8>, WMTPixelFormat, uint8_t>, RpsVocabHash> rps_vocab_;
+
   CachedSM50Shader *CreateShader(const void *pBytecode,
                                  uint32_t BytecodeLength) {
     auto sha1 = Sha1HashState::compute(pBytecode, BytecodeLength);
@@ -462,6 +481,10 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       descriptor_shader_map_[str::format(vs_name, "/", ps_name)].insert(*pDesc);
       dirty_maps_ = true;
     }
+
+    std::array<WMTPixelFormat, 8> formats;
+    std::copy(std::begin(pDesc->ColorAttachmentFormats), std::end(pDesc->ColorAttachmentFormats), formats.begin());
+    rps_vocab_.insert(std::tuple<UINT, std::array<WMTPixelFormat, 8>, WMTPixelFormat, uint8_t>(pDesc->NumColorAttachments, formats, pDesc->DepthStencilFormat, pDesc->SampleCount));
 
     auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc, pso_cache_, pso_cache_mutex_)});
     if (!inserted) {
@@ -935,6 +958,23 @@ public:
       writeShaderPairMap(vs_to_ps_map_, WMT::GetCacheDir() + "vs_to_ps_map.bin");
       writeShaderPairMap(ps_to_vs_map_, WMT::GetCacheDir() + "ps_to_vs_map.bin");
       writeCacheToDisk(WMT::GetCacheDir() + "shader_descriptor_map.bin");
+    }
+
+    Logger::info(str::format("rps_vocab_ size: {}", rps_vocab_.size()));
+
+    // Log contents
+    for (const auto& entry : rps_vocab_) {
+        const auto& [uint_val, pixel_formats, pixel_format_single, uint8_val] = entry;
+
+        // Build the pixel format array string
+        std::string formats_str = "[";
+        for (int i = 0; i < 8; ++i) {
+            formats_str += std::to_string(static_cast<int>(pixel_formats[i]));
+            if (i < 7) formats_str += ", ";
+        }
+        formats_str += "]";
+
+        Logger::info(str::format("  uint={", uint_val, "}, pixel_formats={", formats_str, "}, pixel_format_single={", static_cast<int>(pixel_format_single), "}, uint8={", static_cast<int>(uint8_val), "}"));
     }
   }
 };
