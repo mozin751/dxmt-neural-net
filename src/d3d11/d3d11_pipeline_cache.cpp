@@ -10,6 +10,8 @@
 #include "util_env.hpp"
 #include "../d3d10/d3d10_shader.hpp"
 #include "../d3d10/d3d10_input_layout.hpp"
+#include "../../libs/DXBCParser/BlobContainer.h"
+#include "../../libs/DXBCParser/DXBCUtils.h"
 #include <cstring>
 #include <shared_mutex>
 #include <unordered_map>
@@ -308,6 +310,9 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     if (!managed_shader) {
       return E_FAIL;
     }
+
+    auto res = ExtractMaxColorAttachments(pBytecode, BytecodeLength);
+    managed_shader->max_num_color_attachments = res;
    
     const auto ps_name = managed_shader->sha1().string().substr(0, 8);
     for (const auto& vs_name: ps_to_vs_map_[ps_name]) {
@@ -426,6 +431,14 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     return blend_states.CreateStateObject(pBlendDesc, ppBlendState);
   }
 
+  void lock_shader_deterministic_fields(MTL_GRAPHICS_PIPELINE_DESC *pDesc) {
+    auto vs = pDesc->VertexShader;
+    auto ps = pDesc->PixelShader;
+
+    pDesc->GSStripTopology = false;
+    pDesc->GSPassthrough = ~0u;
+  }
+
   void PrecompileGraphicsPipelines(const std::string& vs_name, const std::optional<std::string>& ps_name, ManagedShader vs, ManagedShader ps) {
     auto name = str::format(vs_name, "/", ps_name.value_or(kDefaultPSName));
     if (encountered_pairs_.count(name) > 0) return;
@@ -462,6 +475,24 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       descriptor_shader_map_[str::format(vs_name, "/", ps_name)].insert(*pDesc);
       dirty_maps_ = true;
     }
+
+    // Verify predicted max num color attachments
+    if (pDesc->PixelShader) {
+      if (pDesc->PixelShader->max_num_color_attachments == pDesc->NumColorAttachments) {
+        Logger::info(str::format("NumColorAttachments predicted exactly. Predicted: ", pDesc->NumColorAttachments));
+      } else if (pDesc->PixelShader->max_num_color_attachments > pDesc->NumColorAttachments) {
+        Logger::info(str::format("NumColorAttachments predicted max bound. Predicted:  ", pDesc->PixelShader->max_num_color_attachments, " vs actual: ", pDesc->NumColorAttachments));
+      } else {
+        Logger::info(str::format("NumColorAttachments predicted incorrectly. Predicted:  ", pDesc->PixelShader->max_num_color_attachments, " vs actual: ", pDesc->NumColorAttachments));
+      }
+    }
+
+    // auto vs_name = pDesc->VertexShader->sha1().string().substr(0, 8);
+    // std::string ps_name = kDefaultPSName;
+    //   if (pDesc->PixelShader) {
+    //     ps_name = pDesc->PixelShader->sha1().string().substr(0, 8);
+    //   }
+    // if (pDesc->NumColorAttachments == 0) Logger::info(str::format("Num color attachments: 0??? ", vs_name, "/", ps_name));
 
     auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc, pso_cache_, pso_cache_mutex_)});
     if (!inserted) {
@@ -909,8 +940,49 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
           cache[hash] = archive;
         }
     }
-    
+  }
 
+  // Returns the upper bound on NumColorAttachments for this PS.
+  // 0 means "depth-only or discard-only PS"; the predictor should treat
+  // 0 as a strong hint about the render-pass kind, not as a missing value.
+  int ExtractMaxColorAttachments(const void* dxbc, size_t size) {
+    microsoft::CDXBCParser container;
+    if (FAILED(container.ReadDXBC(dxbc, size))) return 0;
+    UINT idx = container.FindNextMatchingBlob(microsoft::DXBC_OutputSignature, 0);
+    if (idx == DXBC_BLOB_NOT_FOUND) {
+      Logger::info("MaxColorAttachments: Blob not found");
+      return 0;
+    }
+    microsoft::CSignatureParser parser;
+    if (FAILED(parser.ReadSignature4(container.GetBlob(idx),
+                                    container.GetBlobSize(idx)))) {
+      Logger::info("MaxColorAttachments: Read signature failed.");
+      return 0;    
+    }
+
+    const microsoft::D3D11_SIGNATURE_PARAMETER* params = nullptr;
+    UINT count = parser.GetParameters(&params);
+
+    if (count == 0) {
+      Logger::info("MaxColorAttachments: Count is 0");
+    }
+
+    int max_slot = -1;
+    for (UINT i = 0; i < count; ++i) {
+      // Logger::info("in loop");
+      const auto& p = params[i];
+      // SV_Target may show up as D3D_NAME_TARGET (newer fxc) or as
+      // D3D_NAME_UNDEFINED with SemanticName="SV_TARGET" (older fxc).
+      bool is_target =
+          p.SystemValue == D3D_NAME_TARGET ||
+          (p.SystemValue == D3D_NAME_UNDEFINED &&
+          p.SemanticName != nullptr &&
+          _stricmp(p.SemanticName, "SV_TARGET") == 0);
+      if (!is_target) continue;
+      int slot = static_cast<int>(p.SemanticIndex);
+      if (slot > max_slot) max_slot = slot;
+    }
+    return (max_slot + 1);  // -1 → 0, 0 → 1, 3 → 4
   }
 
 public:

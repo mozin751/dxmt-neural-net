@@ -218,6 +218,7 @@ public:
 
   virtual WMT::Reference<WMT::DispatchData> find_cached_variant(Sha1Digest &key) = 0;
   virtual void update_cached_variant(Sha1Digest &key, WMT::DispatchData data) = 0;
+  int max_num_color_attachments = -1;
 };
 
 template <typename Variant>
