@@ -311,8 +311,8 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       return E_FAIL;
     }
 
-    auto res = ExtractMaxColorAttachments(pBytecode, BytecodeLength);
-    managed_shader->max_num_color_attachments = res;
+    auto res = ExtractPSColorOutputs(pBytecode, BytecodeLength);
+    managed_shader->outs = res;
    
     const auto ps_name = managed_shader->sha1().string().substr(0, 8);
     for (const auto& vs_name: ps_to_vs_map_[ps_name]) {
@@ -452,6 +452,63 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     }
   }
 
+  static ScalarClass classify_wmt_format(WMTPixelFormat fmt) {
+    // The enum packs swizzle/AlphaIsOne bits into the high nibble
+    // (WMTPixelFormatCustomSwizzle = 0x00F00000). Strip them so e.g.
+    // BGRX8Unorm (= AlphaIsOne | BGRA8Unorm) classifies as its base format.
+    const uint32_t base = static_cast<uint32_t>(fmt) & ~WMTPixelFormatCustomSwizzle;
+
+    switch (static_cast<WMTPixelFormat>(base)) {
+      // ---- UInt-class color formats ----
+      case WMTPixelFormatR8Uint:
+      case WMTPixelFormatR16Uint:
+      case WMTPixelFormatRG8Uint:
+      case WMTPixelFormatR32Uint:
+      case WMTPixelFormatRG16Uint:
+      case WMTPixelFormatRGBA8Uint:
+      case WMTPixelFormatRGB10A2Uint:
+      case WMTPixelFormatRG32Uint:
+      case WMTPixelFormatRGBA16Uint:
+      case WMTPixelFormatRGBA32Uint:
+        return ScalarClass::UInt;
+
+      // ---- SInt-class color formats ----
+      case WMTPixelFormatR8Sint:
+      case WMTPixelFormatR16Sint:
+      case WMTPixelFormatRG8Sint:
+      case WMTPixelFormatR32Sint:
+      case WMTPixelFormatRG16Sint:
+      case WMTPixelFormatRGBA8Sint:
+      case WMTPixelFormatRG32Sint:
+      case WMTPixelFormatRGBA16Sint:
+      case WMTPixelFormatRGBA32Sint:
+        return ScalarClass::SInt;
+
+      // ---- Not a color format: depth, stencil, depth-stencil, invalid ----
+      // If we see one of these in ColorAttachmentFormats it means something
+      // upstream wrote a DS format into a color slot — the class-mismatch log
+      // will pick it up (declared=Float, actual=None).
+      case WMTPixelFormatInvalid:
+      case WMTPixelFormatDepth16Unorm:
+      case WMTPixelFormatDepth32Float:
+      case WMTPixelFormatStencil8:
+      case WMTPixelFormatDepth24Unorm_Stencil8:
+      case WMTPixelFormatDepth32Float_Stencil8:
+      case WMTPixelFormatX32_Stencil8:
+      case WMTPixelFormatX24_Stencil8:
+        return ScalarClass::None;
+
+      // ---- Everything else is float-class from the PS perspective ----
+      // Covers: all *Unorm / *Snorm / *_sRGB / *Float / R11G11B10F / RGB9E5F /
+      // RGB10A2Unorm / A8Unorm / B5G6R5 / A1BGR5 / ABGR4 / BGR5A1 / BGR10_XR /
+      // BGRA10_XR, plus BC1-7, EAC, ETC2, PVRTC, ASTC (LDR/sRGB/HDR), and the
+      // YUV pair GBGR422 / BGRG422. None of the compressed families are legal
+      // RT formats in D3D11/Metal, but classifying them as Float is harmless.
+      default:
+        return ScalarClass::Float;
+    }
+  }
+
   void GetGraphicsPipeline(MTL_GRAPHICS_PIPELINE_DESC *pDesc,
                            MTLCompiledGraphicsPipeline **ppPipeline,
                            bool* pWasCached = nullptr, bool fromCache = false) override {
@@ -476,23 +533,49 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       dirty_maps_ = true;
     }
 
-    // Verify predicted max num color attachments
+    // Verify predicted max num color attachments TODO: Remove
     if (pDesc->PixelShader) {
-      if (pDesc->PixelShader->max_num_color_attachments == pDesc->NumColorAttachments) {
-        Logger::info(str::format("NumColorAttachments predicted exactly. Predicted: ", pDesc->NumColorAttachments));
-      } else if (pDesc->PixelShader->max_num_color_attachments > pDesc->NumColorAttachments) {
-        Logger::info(str::format("NumColorAttachments predicted max bound. Predicted:  ", pDesc->PixelShader->max_num_color_attachments, " vs actual: ", pDesc->NumColorAttachments));
+      const auto& ps_out = pDesc->PixelShader->outs;
+
+      // Count check (unchanged from before, just reading from the struct)
+      if (ps_out.count == pDesc->NumColorAttachments) {
+        Logger::info(str::format(
+          "NumColorAttachments predicted exactly. Predicted: ",
+          pDesc->NumColorAttachments));
+      } else if (ps_out.count > pDesc->NumColorAttachments) {
+        Logger::info(str::format(
+          "NumColorAttachments predicted max bound. Predicted: ",
+          (int)ps_out.count, " vs actual: ", pDesc->NumColorAttachments));
       } else {
-        Logger::info(str::format("NumColorAttachments predicted incorrectly. Predicted:  ", pDesc->PixelShader->max_num_color_attachments, " vs actual: ", pDesc->NumColorAttachments));
+        Logger::info(str::format(
+          "NumColorAttachments predicted incorrectly. PS=",
+          pDesc->PixelShader->sha1().string().substr(0, 8),
+          " predicted=", (int)ps_out.count,
+          " actual=", pDesc->NumColorAttachments));
+      }
+
+      // Class check: for each bound RT, verify the PS class is compatible
+      // with the actual Metal format the engine chose.
+      for (uint32_t i = 0; i < pDesc->NumColorAttachments; ++i) {
+        ScalarClass declared = (i < 8) ? ps_out.classes[i] : ScalarClass::None;
+        ScalarClass actual   = classify_wmt_format(pDesc->ColorAttachmentFormats[i]);
+        // None on the PS side just means the slot was unused/undeclared — RT
+        // bound to a slot the PS doesn't write to is legal (the discard-only case
+        // from your earlier log).
+        if (declared != ScalarClass::None && declared != actual) {
+          Logger::info(str::format(
+            "ColorAttachmentFormat class MISMATCH"
+            " PS=", pDesc->PixelShader->sha1().string().substr(0, 8),
+            " slot=", i,
+            " declared_class=", (int)declared,
+            " actual_class=", (int)actual,
+            " actual_fmt=", (uint32_t)pDesc->ColorAttachmentFormats[i],
+            " NumRT=", pDesc->NumColorAttachments,
+            " raster=", (int)pDesc->RasterizationEnabled,
+            " topology=", (int)pDesc->TopologyClass));
+        }
       }
     }
-
-    // auto vs_name = pDesc->VertexShader->sha1().string().substr(0, 8);
-    // std::string ps_name = kDefaultPSName;
-    //   if (pDesc->PixelShader) {
-    //     ps_name = pDesc->PixelShader->sha1().string().substr(0, 8);
-    //   }
-    // if (pDesc->NumColorAttachments == 0) Logger::info(str::format("Num color attachments: 0??? ", vs_name, "/", ps_name));
 
     auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc, pso_cache_, pso_cache_mutex_)});
     if (!inserted) {
@@ -942,47 +1025,67 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     }
   }
 
-  // Returns the upper bound on NumColorAttachments for this PS.
-  // 0 means "depth-only or discard-only PS"; the predictor should treat
-  // 0 as a strong hint about the render-pass kind, not as a missing value.
-  int ExtractMaxColorAttachments(const void* dxbc, size_t size) {
+  static ScalarClass to_scalar_class(microsoft::D3D10_SB_REGISTER_COMPONENT_TYPE t) {
+    switch (t) {
+      case microsoft::D3D10_SB_REGISTER_COMPONENT_FLOAT32: return ScalarClass::Float;
+      case microsoft::D3D10_SB_REGISTER_COMPONENT_UINT32:  return ScalarClass::UInt;
+      case microsoft::D3D10_SB_REGISTER_COMPONENT_SINT32:  return ScalarClass::SInt;
+      default:                                        return ScalarClass::None;
+    }
+  }
+
+  // Walks the PS output signature (OSGN) and returns:
+  //   - count: highest SV_Target slot index + 1 (0 if none)
+  //   - classes[i]: float/uint/sint class the PS writes to slot i, None if unused
+  //   - masks[i]:   xyzw write mask for slot i (4 LSBs), 0 if unused
+  //
+  // Cardinality note: the class only narrows the format down to one of three
+  // families (float-like / uint / sint). It does NOT pin RGBA8 vs RGBA16Float
+  // vs sRGB vs BGRA — those come from history/live context, not from bytecode.
+  PSColorOutputs ExtractPSColorOutputs(const void* dxbc, size_t size) {
+    PSColorOutputs out{};
+    out.classes.fill(ScalarClass::None);
+
     microsoft::CDXBCParser container;
-    if (FAILED(container.ReadDXBC(dxbc, size))) return 0;
+    if (FAILED(container.ReadDXBC(dxbc, size))) return out;
     UINT idx = container.FindNextMatchingBlob(microsoft::DXBC_OutputSignature, 0);
     if (idx == DXBC_BLOB_NOT_FOUND) {
-      Logger::info("MaxColorAttachments: Blob not found");
-      return 0;
+      Logger::info("PSColorOutputs: OSGN blob not found");
+      return out;
     }
+
     microsoft::CSignatureParser parser;
     if (FAILED(parser.ReadSignature4(container.GetBlob(idx),
                                     container.GetBlobSize(idx)))) {
-      Logger::info("MaxColorAttachments: Read signature failed.");
-      return 0;    
+      Logger::info("PSColorOutputs: ReadSignature4 failed");
+      return out;
     }
 
     const microsoft::D3D11_SIGNATURE_PARAMETER* params = nullptr;
     UINT count = parser.GetParameters(&params);
 
-    if (count == 0) {
-      Logger::info("MaxColorAttachments: Count is 0");
-    }
-
     int max_slot = -1;
     for (UINT i = 0; i < count; ++i) {
-      // Logger::info("in loop");
       const auto& p = params[i];
-      // SV_Target may show up as D3D_NAME_TARGET (newer fxc) or as
-      // D3D_NAME_UNDEFINED with SemanticName="SV_TARGET" (older fxc).
       bool is_target =
           p.SystemValue == D3D_NAME_TARGET ||
           (p.SystemValue == D3D_NAME_UNDEFINED &&
           p.SemanticName != nullptr &&
           _stricmp(p.SemanticName, "SV_TARGET") == 0);
       if (!is_target) continue;
+
       int slot = static_cast<int>(p.SemanticIndex);
+      if (slot < 0 || slot >= 8) continue;
+
+      // A given SV_TargetN normally appears as one signature entry, but
+      // OR the mask defensively in case fxc emits split-register entries.
+      out.classes[slot] = to_scalar_class(p.ComponentType);
+      out.masks[slot]   = static_cast<uint8_t>(out.masks[slot] | (p.Mask & 0xF));
       if (slot > max_slot) max_slot = slot;
     }
-    return (max_slot + 1);  // -1 → 0, 0 → 1, 3 → 4
+
+    out.count = static_cast<uint8_t>(max_slot + 1);
+    return out;
   }
 
 public:

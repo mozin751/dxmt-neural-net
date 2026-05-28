@@ -203,6 +203,19 @@ public:
   virtual const std::string& GetFuncName() = 0;
 };
 
+enum class ScalarClass : uint8_t {
+  None  = 0,
+  Float = 1,  // D3D_REGISTER_COMPONENT_FLOAT32
+  UInt  = 2,  // D3D_REGISTER_COMPONENT_UINT32
+  SInt  = 3,  // D3D_REGISTER_COMPONENT_SINT32
+};
+
+struct PSColorOutputs {
+  uint8_t                    count;    // = old max_num_color_attachments (highest slot + 1)
+  std::array<ScalarClass, 8> classes;  // per-slot scalar class; None for absent slots
+  std::array<uint8_t, 8>     masks;    // per-slot xyzw write mask (4 LSBs); 0 for absent slots
+};
+
 class Shader {
 public:
   virtual ~Shader() {};
@@ -218,7 +231,7 @@ public:
 
   virtual WMT::Reference<WMT::DispatchData> find_cached_variant(Sha1Digest &key) = 0;
   virtual void update_cached_variant(Sha1Digest &key, WMT::DispatchData data) = 0;
-  int max_num_color_attachments = -1;
+  PSColorOutputs outs;
 };
 
 template <typename Variant>
