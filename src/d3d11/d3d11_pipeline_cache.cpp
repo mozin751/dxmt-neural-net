@@ -246,6 +246,13 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   std::unordered_map<ManagedShader, std::unique_ptr<MTLCompiledComputePipeline>> pipelines_cs_;
   dxmt::mutex mutex_cs_;
 
+  // input requirement digest -> set of compatible InputLayout sha1s (the contract fact)
+  std::unordered_map<Sha1Digest, std::unordered_set<Sha1Digest>> sig_to_layouts_;
+  // InputLayout sha1 -> live pointer, so a predicted sha1 resolves to the object equal_to wants
+  std::unordered_map<Sha1Digest, CachedInputLayout*> layout_by_sha1_;
+
+  dxmt::mutex mutex_il_sha1_;
+
   CachedSM50Shader *CreateShader(const void *pBytecode,
                                  uint32_t BytecodeLength) {
     auto sha1 = Sha1HashState::compute(pBytecode, BytecodeLength);
@@ -289,6 +296,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       return E_FAIL;
     }
 
+    managed_shader->vs_input_req = ExtractVSInputRequirement(pBytecode, BytecodeLength);
     const auto vs_name = managed_shader->sha1().string().substr(0, 8);
     for (const auto& ps_name: vs_to_ps_map_[vs_name]) {
       if (ps_name.has_value() && pixel_shaders_.count(ps_name.value()) == 0) continue;
@@ -395,8 +403,15 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       input_layouts.emplace(buffer, std::make_unique<CachedInputLayout>(
                                         std::move(buffer), input_slot_mask));
     }
+    auto* cached = input_layouts.at(buffer).get();
     *ppInputLayout =
         ref(new MTLD3D11InputLayout(device, input_layouts.at(buffer).get()));
+
+    auto req = ExtractVSInputRequirementNoSize(pShaderBytecodeWithInputSignature);
+    auto sig = HashVSInputRequirement(req);
+    auto il_sha1 = cached->sha1();
+    sig_to_layouts_[sig].insert(il_sha1);
+    layout_by_sha1_.emplace(il_sha1, cached);
     return hr;
   }
 
@@ -432,11 +447,9 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   }
 
   void lock_shader_deterministic_fields(MTL_GRAPHICS_PIPELINE_DESC *pDesc) {
-    auto vs = pDesc->VertexShader;
-    auto ps = pDesc->PixelShader;
-
     pDesc->GSStripTopology = false;
     pDesc->GSPassthrough = ~0u;
+    pDesc->RasterizationEnabled = pDesc->PixelShader != nullptr;
   }
 
   void PrecompileGraphicsPipelines(const std::string& vs_name, const std::optional<std::string>& ps_name, ManagedShader vs, ManagedShader ps) {
@@ -531,50 +544,6 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       vs_to_ps_map_[vs_name].insert(pDesc->PixelShader ? std::optional<std::string>(ps_name) : std::nullopt);
       descriptor_shader_map_[str::format(vs_name, "/", ps_name)].insert(*pDesc);
       dirty_maps_ = true;
-    }
-
-    // Verify predicted max num color attachments TODO: Remove
-    if (pDesc->PixelShader) {
-      const auto& ps_out = pDesc->PixelShader->outs;
-
-      // Count check (unchanged from before, just reading from the struct)
-      if (ps_out.count == pDesc->NumColorAttachments) {
-        Logger::info(str::format(
-          "NumColorAttachments predicted exactly. Predicted: ",
-          pDesc->NumColorAttachments));
-      } else if (ps_out.count > pDesc->NumColorAttachments) {
-        Logger::info(str::format(
-          "NumColorAttachments predicted max bound. Predicted: ",
-          (int)ps_out.count, " vs actual: ", pDesc->NumColorAttachments));
-      } else {
-        Logger::info(str::format(
-          "NumColorAttachments predicted incorrectly. PS=",
-          pDesc->PixelShader->sha1().string().substr(0, 8),
-          " predicted=", (int)ps_out.count,
-          " actual=", pDesc->NumColorAttachments));
-      }
-
-      // Class check: for each bound RT, verify the PS class is compatible
-      // with the actual Metal format the engine chose.
-      for (uint32_t i = 0; i < pDesc->NumColorAttachments; ++i) {
-        ScalarClass declared = (i < 8) ? ps_out.classes[i] : ScalarClass::None;
-        ScalarClass actual   = classify_wmt_format(pDesc->ColorAttachmentFormats[i]);
-        // None on the PS side just means the slot was unused/undeclared — RT
-        // bound to a slot the PS doesn't write to is legal (the discard-only case
-        // from your earlier log).
-        if (declared != ScalarClass::None && declared != actual) {
-          Logger::info(str::format(
-            "ColorAttachmentFormat class MISMATCH"
-            " PS=", pDesc->PixelShader->sha1().string().substr(0, 8),
-            " slot=", i,
-            " declared_class=", (int)declared,
-            " actual_class=", (int)actual,
-            " actual_fmt=", (uint32_t)pDesc->ColorAttachmentFormats[i],
-            " NumRT=", pDesc->NumColorAttachments,
-            " raster=", (int)pDesc->RasterizationEnabled,
-            " topology=", (int)pDesc->TopologyClass));
-        }
-      }
     }
 
     auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc, pso_cache_, pso_cache_mutex_)});
@@ -698,6 +667,11 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       write_pod(os, count);
       os.write(reinterpret_cast<const char*>(elements),
               sizeof(MTL_SHADER_INPUT_LAYOUT_ELEMENT_DESC) * count);
+      // new: persist the VS-sig this IL was used with
+      Sha1Digest vs_sig{};
+      if (desc.VertexShader)
+        vs_sig = HashVSInputRequirement(desc.VertexShader->vs_input_req);
+      write_pod(os, vs_sig);
     }
 
     const bool has_so = (desc.SOLayout != nullptr);
@@ -848,6 +822,15 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
         ).first;
       }
       desc.InputLayout = it->second.get();
+
+      Sha1Digest vs_sig{};
+      if (!read_pod(is, vs_sig)) return false;
+
+      auto* cached = static_cast<CachedInputLayout*>(it->second.get());
+      if (!(vs_sig == Sha1Digest{})) {
+        sig_to_layouts_[vs_sig].insert(cached->sha1());
+        layout_by_sha1_.emplace(cached->sha1(), cached);
+      }
     }
 
     // --- SOLayout ---
@@ -1088,7 +1071,114 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     return out;
   }
 
-public:
+  VSInputRequirement ExtractVSInputRequirement(const void* dxbc, size_t size) {
+    std::lock_guard<dxmt::mutex> lock(mutex_il_sha1_);
+    VSInputRequirement req;
+    microsoft::CDXBCParser container;
+    if (FAILED(container.ReadDXBC(dxbc, size))) {
+      Logger::info("ExtractVSInputRequirement: ReadDXBC failed");
+      return req;
+    }
+    UINT idx = container.FindNextMatchingBlob(microsoft::DXBC_InputSignature, 0);
+    if (idx == DXBC_BLOB_NOT_FOUND) {
+      Logger::info("ExtractVSInputRequirement: FindNextMatchingBlob failed");
+      return req;
+    }
+
+    microsoft::CSignatureParser parser;
+    if (FAILED(parser.ReadSignature4(container.GetBlob(idx),
+                                    container.GetBlobSize(idx)))) {
+
+      Logger::info("ExtractVSInputRequirement: ReadSignature4 failed");
+      return req;
+    }
+
+    const microsoft::D3D11_SIGNATURE_PARAMETER* params = nullptr;
+    UINT count = parser.GetParameters(&params);
+
+    for (UINT i = 0; i < count; ++i) {
+      const auto& p = params[i];
+      if (p.SystemValue != D3D_NAME_UNDEFINED) continue; // SV_VertexID/InstanceID aren't IA inputs
+
+      VSInputRequirement::Element e{};
+      const char* s = p.SemanticName ? p.SemanticName : "";
+      for (size_t n = 0; s[n] && n < sizeof(e.semantic) - 1; ++n)
+        e.semantic[n] = (char)toupper((unsigned char)s[n]);
+      e.semantic_index  = p.SemanticIndex;
+      e.reg             = p.Register;
+      e.mask            = p.Mask & 0xF;
+      e.component_class = static_cast<uint8_t>(to_scalar_class(p.ComponentType));  // your existing helper
+      req.elements.push_back(e);
+    }
+    return req;
+  }
+
+  VSInputRequirement ExtractVSInputRequirementNoSize(const void* dxbc) {
+    std::lock_guard<dxmt::mutex> lock(mutex_il_sha1_);
+    VSInputRequirement req;
+    microsoft::CDXBCParser container;
+    // Trusts the total-size field in the DXBC header instead of an outside length.
+    if (FAILED(container.ReadDXBCAssumingValidSize(dxbc))) return req;
+    UINT idx = container.FindNextMatchingBlob(microsoft::DXBC_InputSignature, 0);
+    if (idx == DXBC_BLOB_NOT_FOUND) return req;
+
+    microsoft::CSignatureParser parser;
+    if (FAILED(parser.ReadSignature4(container.GetBlob(idx),
+                                    container.GetBlobSize(idx))))
+      return req;
+
+    const microsoft::D3D11_SIGNATURE_PARAMETER* params = nullptr;
+    UINT count = parser.GetParameters(&params);
+    for (UINT i = 0; i < count; ++i) {
+      const auto& p = params[i];
+      if (p.SystemValue != D3D_NAME_UNDEFINED) continue;
+      VSInputRequirement::Element e{};
+      const char* s = p.SemanticName ? p.SemanticName : "";
+      for (size_t n = 0; s[n] && n < sizeof(e.semantic) - 1; ++n)
+        e.semantic[n] = (char)toupper((unsigned char)s[n]);
+      e.semantic_index = p.SemanticIndex;
+      e.reg            = p.Register;
+      e.mask           = p.Mask & 0xF;
+      e.component_class = static_cast<uint8_t>(to_scalar_class(p.ComponentType));
+      req.elements.push_back(e);
+    }
+    return req;
+  }
+
+  static Sha1Digest HashVSInputRequirement(const VSInputRequirement& req) {
+    if (req.elements.empty()) {
+      Logger::info("HashVSInputRequirement: no IA inputs.");
+      return {};  // no IA inputs => associates with null layout
+    }
+    Sha1HashState h;
+    for (const auto& e : req.elements) h.update(e);  // Element is trivially copyable
+    h.update(req.elements.size());
+    return h.final();
+  }
+  
+  // Does this CachedInputLayout satisfy the VS's input signature?
+  bool LayoutCoversVS(InputLayout* il, const VSInputRequirement& req) {
+    if (req.elements.empty())
+      return il == nullptr;   // VS reads nothing => only a null layout is "correct"
+    if (!il) return false;
+
+    MTL_SHADER_INPUT_LAYOUT_ELEMENT_DESC* els = nullptr;
+    uint32_t n = il->input_layout_element(&els);
+
+    for (const auto& need : req.elements) {
+      bool found = false;
+      for (uint32_t j = 0; j < n; ++j) {
+        // DXMT's IA element keys vertex-fetch by input register; match on that.
+        // (Adjust the field name to whatever MTL_SHADER_INPUT_LAYOUT_ELEMENT_DESC
+        //  exposes — it's the register/attribute index the VS reads.)
+        if (els[j].Index == need.reg) { found = true; break; }
+      }
+      if (!found) return false;  // VS reads a register the layout doesn't feed
+    }
+    return true;
+  }
+
+  public:
   PipelineCache(MTLD3D11Device *pDevice) :
       scache_(ShaderCache::getInstance(pDevice->GetDXMTDevice().metalVersion())),
       dirty_maps_(false),

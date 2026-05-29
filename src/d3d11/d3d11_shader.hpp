@@ -216,6 +216,18 @@ struct PSColorOutputs {
   std::array<uint8_t, 8>     masks;    // per-slot xyzw write mask (4 LSBs); 0 for absent slots
 };
 
+struct VSInputRequirement {
+  struct Element {
+    char        semantic[32];   // uppercased, null-terminated
+    uint32_t    semantic_index;
+    uint32_t    reg;            // input register the VS reads it from
+    uint8_t     mask;           // xyzw components actually read
+    uint8_t     component_class; // 1=float 2=uint 3=sint  (your ScalarClass)
+  };
+  std::vector<Element> elements;   // empty => VS reads no IA input => layout must be null
+};
+
+
 class Shader {
 public:
   virtual ~Shader() {};
@@ -232,6 +244,7 @@ public:
   virtual WMT::Reference<WMT::DispatchData> find_cached_variant(Sha1Digest &key) = 0;
   virtual void update_cached_variant(Sha1Digest &key, WMT::DispatchData data) = 0;
   PSColorOutputs outs;
+  VSInputRequirement vs_input_req;
 };
 
 template <typename Variant>
