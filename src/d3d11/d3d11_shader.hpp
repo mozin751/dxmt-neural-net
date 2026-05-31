@@ -7,6 +7,7 @@
 #include "d3d11_input_layout.hpp"
 #include "sha1/sha1_util.hpp"
 #include "log/log.hpp"
+#include "DXBCParser/DXBCUtils.h"
 #include <variant>
 
 struct MTL_COMPILED_SHADER {
@@ -203,6 +204,39 @@ public:
   virtual const std::string& GetFuncName() = 0;
 };
 
+enum class ScalarClass : uint8_t {
+  None  = 0,
+  Float = 1,  // D3D_REGISTER_COMPONENT_FLOAT32
+  UInt  = 2,  // D3D_REGISTER_COMPONENT_UINT32
+  SInt  = 3,  // D3D_REGISTER_COMPONENT_SINT32
+};
+
+static ScalarClass to_scalar_class(microsoft::D3D10_SB_REGISTER_COMPONENT_TYPE t) {
+  switch (t) {
+    case microsoft::D3D10_SB_REGISTER_COMPONENT_FLOAT32: return ScalarClass::Float;
+    case microsoft::D3D10_SB_REGISTER_COMPONENT_UINT32:  return ScalarClass::UInt;
+    case microsoft::D3D10_SB_REGISTER_COMPONENT_SINT32:  return ScalarClass::SInt;
+    default:                                        return ScalarClass::None;
+  }
+}
+
+struct PSColorOutputs {
+  uint8_t                    count;    // = old max_num_color_attachments (highest slot + 1)
+  std::array<ScalarClass, 8> classes;  // per-slot scalar class; None for absent slots
+  std::array<uint8_t, 8>     masks;    // per-slot xyzw write mask (4 LSBs); 0 for absent slots
+};
+
+struct VSInputRequirement {
+  struct Element {
+    char        semantic[32];   // uppercased, null-terminated
+    uint32_t    semantic_index;
+    uint32_t    reg;            // input register the VS reads it from
+    uint8_t     mask;           // xyzw components actually read
+    uint8_t     component_class; // 1=float 2=uint 3=sint  (your ScalarClass)
+  };
+  std::vector<Element> elements;   // empty => VS reads no IA input => layout must be null
+};
+
 class Shader {
 public:
   virtual ~Shader() {};
@@ -218,6 +252,8 @@ public:
 
   virtual WMT::Reference<WMT::DispatchData> find_cached_variant(Sha1Digest &key) = 0;
   virtual void update_cached_variant(Sha1Digest &key, WMT::DispatchData data) = 0;
+  PSColorOutputs ps_outs;
+  VSInputRequirement vs_input_req;
 };
 
 template <typename Variant>

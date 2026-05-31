@@ -3,6 +3,7 @@
 #include "d3d11_device.hpp"
 #include "d3d11_shader.hpp"
 #include "d3d11_pipeline.hpp"
+#include "d3d11_predict_pso.hpp"
 #include "dxmt_shader_cache.hpp"
 #include "dxmt_tasks.hpp"
 #include "log/log.hpp"
@@ -10,6 +11,8 @@
 #include "util_env.hpp"
 #include "../d3d10/d3d10_shader.hpp"
 #include "../d3d10/d3d10_input_layout.hpp"
+#include "DXBCParser/BlobContainer.h"
+#include "DXBCParser/DXBCUtils.h"
 #include <cstring>
 #include <shared_mutex>
 #include <unordered_map>
@@ -244,6 +247,9 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   std::unordered_map<ManagedShader, std::unique_ptr<MTLCompiledComputePipeline>> pipelines_cs_;
   dxmt::mutex mutex_cs_;
 
+  std::unordered_map<Sha1Digest, std::unordered_set<Sha1Digest>> input_requirement_to_layouts_;
+  std::unordered_map<Sha1Digest, CachedInputLayout*> layout_by_sha1_;
+
   CachedSM50Shader *CreateShader(const void *pBytecode,
                                  uint32_t BytecodeLength) {
     auto sha1 = Sha1HashState::compute(pBytecode, BytecodeLength);
@@ -287,6 +293,8 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       return E_FAIL;
     }
 
+    managed_shader->vs_input_req = ExtractVSInputRequirement(pBytecode, BytecodeLength);
+
     const auto vs_name = managed_shader->sha1().string().substr(0, 8);
     for (const auto& ps_name: vs_to_ps_map_[vs_name]) {
       if (ps_name.has_value() && pixel_shaders_.count(ps_name.value()) == 0) continue;
@@ -308,6 +316,8 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     if (!managed_shader) {
       return E_FAIL;
     }
+
+    managed_shader->ps_outs = ExtractPSColorOutputs(pBytecode, BytecodeLength);;
    
     const auto ps_name = managed_shader->sha1().string().substr(0, 8);
     for (const auto& vs_name: ps_to_vs_map_[ps_name]) {
@@ -390,8 +400,15 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       input_layouts.emplace(buffer, std::make_unique<CachedInputLayout>(
                                         std::move(buffer), input_slot_mask));
     }
+    auto* cached = input_layouts.at(buffer).get();
     *ppInputLayout =
         ref(new MTLD3D11InputLayout(device, input_layouts.at(buffer).get()));
+
+    auto req = ExtractVSInputRequirementNoSize(pShaderBytecodeWithInputSignature);
+    auto sig = HashVSInputRequirement(req);
+    auto il_sha1 = cached->sha1();
+    input_requirement_to_layouts_[sig].insert(il_sha1);
+    layout_by_sha1_.emplace(il_sha1, cached);
     return hr;
   }
 
@@ -584,6 +601,11 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       write_pod(os, count);
       os.write(reinterpret_cast<const char*>(elements),
               sizeof(MTL_SHADER_INPUT_LAYOUT_ELEMENT_DESC) * count);
+
+      Sha1Digest vs_sig{};
+      if (desc.VertexShader)
+        vs_sig = HashVSInputRequirement(desc.VertexShader->vs_input_req);
+      write_pod(os, vs_sig);
     }
 
     const bool has_so = (desc.SOLayout != nullptr);
@@ -734,6 +756,15 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
         ).first;
       }
       desc.InputLayout = it->second.get();
+
+      Sha1Digest vs_sig{};
+      if (!read_pod(is, vs_sig)) return false;
+
+      auto* cached = static_cast<CachedInputLayout*>(it->second.get());
+      if (!(vs_sig == Sha1Digest{})) {
+        input_requirement_to_layouts_[vs_sig].insert(cached->sha1());
+        layout_by_sha1_.emplace(cached->sha1(), cached);
+      }
     }
 
     // --- SOLayout ---
@@ -909,11 +940,9 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
           cache[hash] = archive;
         }
     }
-    
-
   }
 
-public:
+  public:
   PipelineCache(MTLD3D11Device *pDevice) :
       scache_(ShaderCache::getInstance(pDevice->GetDXMTDevice().metalVersion())),
       dirty_maps_(false),
