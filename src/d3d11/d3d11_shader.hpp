@@ -7,6 +7,7 @@
 #include "d3d11_input_layout.hpp"
 #include "sha1/sha1_util.hpp"
 #include "log/log.hpp"
+#include "DXBCParser/DXBCUtils.h"
 #include <variant>
 
 struct MTL_COMPILED_SHADER {
@@ -210,6 +211,15 @@ enum class ScalarClass : uint8_t {
   SInt  = 3,  // D3D_REGISTER_COMPONENT_SINT32
 };
 
+static ScalarClass to_scalar_class(microsoft::D3D10_SB_REGISTER_COMPONENT_TYPE t) {
+  switch (t) {
+    case microsoft::D3D10_SB_REGISTER_COMPONENT_FLOAT32: return ScalarClass::Float;
+    case microsoft::D3D10_SB_REGISTER_COMPONENT_UINT32:  return ScalarClass::UInt;
+    case microsoft::D3D10_SB_REGISTER_COMPONENT_SINT32:  return ScalarClass::SInt;
+    default:                                        return ScalarClass::None;
+  }
+}
+
 struct PSColorOutputs {
   uint8_t                    count;    // = old max_num_color_attachments (highest slot + 1)
   std::array<ScalarClass, 8> classes;  // per-slot scalar class; None for absent slots
@@ -227,7 +237,6 @@ struct VSInputRequirement {
   std::vector<Element> elements;   // empty => VS reads no IA input => layout must be null
 };
 
-
 class Shader {
 public:
   virtual ~Shader() {};
@@ -243,7 +252,7 @@ public:
 
   virtual WMT::Reference<WMT::DispatchData> find_cached_variant(Sha1Digest &key) = 0;
   virtual void update_cached_variant(Sha1Digest &key, WMT::DispatchData data) = 0;
-  PSColorOutputs outs;
+  PSColorOutputs ps_outs;
   VSInputRequirement vs_input_req;
 };
 
