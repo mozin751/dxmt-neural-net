@@ -4,9 +4,54 @@
 #include "sha1/sha1_util.hpp"
 #include "DXBCParser/BlobContainer.h"
 #include "DXBCParser/DXBCUtils.h"
+#include <unordered_set>
+
+namespace dxmt {
+struct Prediction {
+  MTL_GRAPHICS_PIPELINE_DESC pDesc;
+  bool hit = false;
+
+  bool operator==(const Prediction& other) const {
+    return std::equal_to<MTL_GRAPHICS_PIPELINE_DESC>{}(pDesc, other.pDesc);
+  }
+};
+} // namespace dxmt
+
+namespace std {
+template <> struct hash<dxmt::Prediction> {
+  size_t operator()(const dxmt::Prediction& p) const noexcept {
+    return std::hash<MTL_GRAPHICS_PIPELINE_DESC>{}(p.pDesc);
+  }
+};
+} // namespace std
 
 
 namespace dxmt {
+static std::string format_desc(const MTL_GRAPHICS_PIPELINE_DESC& d) {
+  std::string s;
+  s += "VS="       + (d.VertexShader   ? d.VertexShader->sha1().string().substr(0,8)   : "null");
+  s += " PS="      + (d.PixelShader    ? d.PixelShader->sha1().string().substr(0,8)    : "null");
+  s += " NCA="     + std::to_string(d.NumColorAttachments);
+  s += " CAF=[";
+  for (uint8_t i = 0; i < 8; i++) {
+      if (i) s += ",";
+      s += std::to_string(static_cast<uint32_t>(d.ColorAttachmentFormats[i]));
+  }
+  s += "] DSF="    + std::to_string(static_cast<uint32_t>(d.DepthStencilFormat));
+  s += " TOPO="    + std::to_string(static_cast<uint32_t>(d.TopologyClass));
+  s += " RASTER="  + std::to_string(d.RasterizationEnabled);
+  s += " SC="      + std::to_string(d.SampleCount);
+  s += " GSSTrip=" + std::to_string(d.GSStripTopology);
+  s += " IBF="     + std::to_string(static_cast<uint32_t>(d.IndexBufferFormat));
+  s += " SMASK="   + std::to_string(d.SampleMask);
+  s += " GSPass="  + std::to_string(d.GSPassthrough);
+  s += " BLEND=" + std::to_string(reinterpret_cast<uintptr_t>(d.BlendState));
+  s += " IL="    + std::to_string(reinterpret_cast<uintptr_t>(d.InputLayout));
+  s += " SO="    + std::to_string(reinterpret_cast<uintptr_t>(d.SOLayout));
+  s += " HS="    + std::to_string(reinterpret_cast<uintptr_t>(d.HullShader));
+  s += " GS="    + std::to_string(reinterpret_cast<uintptr_t>(d.GeometryShader));
+  return s;
+}
 // Walks the PS output signature (OSGN) and returns:
 //   - count: highest SV_Target slot index + 1 (0 if none)
 //   - classes[i]: float/uint/sint class the PS writes to slot i, None if unused
@@ -164,6 +209,132 @@ bool LayoutCoversVS(InputLayout* il, const VSInputRequirement& req) {
     if (!found) return false;  // VS reads a register the layout doesn't feed
   }
   return true;
+}
+
+void lock_shader_deterministic_fields(MTL_GRAPHICS_PIPELINE_DESC *pDesc) {
+  pDesc->GSStripTopology = false;
+  pDesc->GSPassthrough = ~0u;
+  pDesc->RasterizationEnabled = pDesc->PixelShader != nullptr;
+  pDesc->SampleMask = 0xFFFFFFFFu;
+  pDesc->SOLayout = nullptr;
+}
+
+void set_shader_defaults(MTL_GRAPHICS_PIPELINE_DESC *pDesc,
+                         std::unique_ptr<ManagedDeviceChild<IMTLD3D11BlendState>>& default_blend_state_ptr) {
+  // pDesc->IndexBufferFormat = SM50_INDEX_BUFFER_FORMAT_UINT16;
+  // pDesc->DepthStencilFormat = WMTPixelFormatDepth32Float_Stencil8;
+  pDesc->TopologyClass = WMTPrimitiveTopologyClassTriangle;
+  pDesc->BlendState = default_blend_state_ptr.get();
+}
+
+std::vector<Prediction> predictor_reflection_and_default(ManagedShader vs, ManagedShader ps,
+                                                          std::unique_ptr<ManagedDeviceChild<IMTLD3D11BlendState>>& default_blend_state_ptr,
+                                                          std::unordered_map<Sha1Digest, std::unordered_set<Sha1Digest>>& input_requirement_to_layouts,
+                                                          std::unordered_map<Sha1Digest, InputLayout*>& layout_by_sha1,
+                                                          std::unordered_set<Prediction>& previous_predictions
+                                                        ) {
+  // Idea: Get the cartesian product of all CONSTRAINED fields.
+  // Use defaults and locked fields on each candidate desc.
+  // Output into a vector of predictions.
+
+  /**
+   * Constrained fields: 
+   *  - InputLayout: Constrain through compatibility of given ILs and known VS.
+   *  - NumColorAttachments: 0 or max. Only 0 if no PS.
+   *  - ColorAttachmentFormats: Same as above. Only do 1 each (expand later).
+  */
+
+  std::vector<Prediction> predictions;
+  std::vector<InputLayout*> valid_ils;
+
+  // Get list of valid input layouts
+  for (const auto input_req_digest: input_requirement_to_layouts[HashVSInputRequirement(vs->vs_input_req)]) {
+    valid_ils.push_back(layout_by_sha1[input_req_digest]);
+  }
+
+  // Sample count cross product
+  for (uint8_t i = 0; i < 2; i++) {
+    MTL_GRAPHICS_PIPELINE_DESC pDesc{};
+    pDesc.SampleCount = i + 1;
+    pDesc.VertexShader = vs;
+    pDesc.PixelShader = ps;
+
+    for (int dsf_selector = 0; dsf_selector < 2; ++dsf_selector) {
+      switch (dsf_selector)
+      {
+      case 0:
+        pDesc.DepthStencilFormat = WMTPixelFormatDepth32Float_Stencil8;
+        break;
+
+      case 1:
+        pDesc.DepthStencilFormat = WMTPixelFormatInvalid;
+        break;
+
+      default:
+        pDesc.DepthStencilFormat = WMTPixelFormatDepth16Unorm;
+      }
+
+      for (int ibf_selector = 0; ibf_selector < 2; ++ibf_selector) {
+        pDesc.IndexBufferFormat = ibf_selector % 2 == 0 ? SM50_INDEX_BUFFER_FORMAT_UINT16 : SM50_INDEX_BUFFER_FORMAT_NONE;
+        
+        for (const auto input_layout: valid_ils) {
+          lock_shader_deterministic_fields(&pDesc);
+          set_shader_defaults(&pDesc, default_blend_state_ptr);
+
+          pDesc.InputLayout = input_layout;
+
+          pDesc.NumColorAttachments = 1;
+          for (uint8_t i = 0; i < 8; ++i) {
+            pDesc.ColorAttachmentFormats[i] = WMTPixelFormatInvalid;
+          }
+
+          Prediction pred_no_color{pDesc};
+          if (previous_predictions.count(pred_no_color) == 0) {
+            predictions.push_back(pred_no_color);
+            previous_predictions.insert(pred_no_color);
+            Logger::info(str::format("PREDICTED: ", format_desc(pred_no_color.pDesc)));
+          }
+
+
+          if (ps == nullptr) {
+            continue;
+          }
+
+          pDesc.NumColorAttachments = ps->ps_outs.count;
+
+          for (int j = 0; j < 2; ++j) {
+            for (uint8_t i = 0; i < pDesc.NumColorAttachments; i++) {
+              switch (ps->ps_outs.classes[i]) {        
+                case ScalarClass::Float:
+                pDesc.ColorAttachmentFormats[i] = j%2 == 0 ? WMTPixelFormatRG11B10Float : WMTPixelFormatRGBA8Unorm_sRGB;
+                break;
+
+                case ScalarClass::SInt :
+                pDesc.ColorAttachmentFormats[i] = WMTPixelFormatR32Sint;
+                break;
+
+                case ScalarClass::UInt :
+                pDesc.ColorAttachmentFormats[i] = WMTPixelFormatR32Uint;
+                break;
+
+                default:
+                pDesc.ColorAttachmentFormats[i] = WMTPixelFormatInvalid;
+              }
+            }
+
+            Prediction pred_with_color{pDesc};
+            if (previous_predictions.count(pred_with_color) == 0) {
+              predictions.push_back(pred_with_color);
+              previous_predictions.insert(pred_with_color);
+              Logger::info(str::format("PREDICTED: ", format_desc(pred_with_color.pDesc)));
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return predictions;
 }
 
 }

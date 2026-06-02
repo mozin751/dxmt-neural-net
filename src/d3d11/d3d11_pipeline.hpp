@@ -13,19 +13,19 @@ struct MTL_GRAPHICS_PIPELINE_DESC {
   ManagedShader DomainShader;
   ManagedShader GeometryShader;
   ManagedShader PixelShader;
-  IMTLD3D11BlendState *BlendState;
-  ManagedInputLayout InputLayout;
-  IMTLD3D11StreamOutputLayout *SOLayout;
-  UINT NumColorAttachments;
-  WMTPixelFormat ColorAttachmentFormats[8];
-  WMTPixelFormat DepthStencilFormat;
-  WMTPrimitiveTopologyClass TopologyClass;
-  bool RasterizationEnabled;
-  uint8_t SampleCount;
-  bool GSStripTopology;
-  SM50_INDEX_BUFFER_FORAMT IndexBufferFormat;
-  uint32_t SampleMask;
-  uint32_t GSPassthrough;
+  IMTLD3D11BlendState *BlendState; // Default
+  ManagedInputLayout InputLayout; // Constrained
+  IMTLD3D11StreamOutputLayout *SOLayout; // Known
+  UINT NumColorAttachments; // Constrained
+  WMTPixelFormat ColorAttachmentFormats[8]; // Constrained
+  WMTPixelFormat DepthStencilFormat; // Default
+  WMTPrimitiveTopologyClass TopologyClass; // Default
+  bool RasterizationEnabled; // Known
+  uint8_t SampleCount; // Default
+  bool GSStripTopology; // Known
+  SM50_INDEX_BUFFER_FORAMT IndexBufferFormat; // Default
+  uint32_t SampleMask; // Known
+  uint32_t GSPassthrough; // Known
 };
 
 struct MTL_COMPUTE_PIPELINE_DESC {

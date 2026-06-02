@@ -160,10 +160,10 @@ template <typename DESC, typename Object> class StateObjectCache {
 public:
   StateObjectCache(MTLD3D11Device *device) : device(device) {};
   HRESULT CreateStateObject(const DESC *pDesc, Object **ppRet);
+  std::unordered_map<DESC, std::unique_ptr<ManagedDeviceChild<Object>>> cache;
 
 private:
   MTLD3D11Device *device;
-  std::unordered_map<DESC, std::unique_ptr<ManagedDeviceChild<Object>>> cache;
   dxmt::mutex mutex_cache;
 };
 
