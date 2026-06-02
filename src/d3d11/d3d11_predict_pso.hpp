@@ -555,4 +555,159 @@ predictor_most_frequent_rps_blend(
   return predictions;
 }
 
+// Controls whether the cross-product is capped.
+// Set to 0 to disable the cap and emit all combinations.
+constexpr uint32_t kPerFieldModeMaxCandidates = 10;
+
+template <typename T>
+static std::vector<std::pair<uint32_t, T>>
+top_n(const std::unordered_map<T, uint32_t> &freq, uint32_t n) {
+  std::vector<std::pair<uint32_t, T>> ranked;
+  ranked.reserve(freq.size());
+  for (const auto &[val, count] : freq)
+    ranked.push_back({count, val});
+  std::sort(ranked.begin(), ranked.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+  if (n > 0 && ranked.size() > n)
+    ranked.resize(n);
+  return ranked;
+}
+
+std::vector<Prediction>
+predictor_per_field_mode(
+    ManagedShader vs, ManagedShader ps, const std::unordered_map<WMTPixelFormat, uint32_t> &dsf_freq,
+    const std::array<std::unordered_map<WMTPixelFormat, uint32_t>, 8> &caf_freq,
+    const std::unordered_map<uint8_t, uint32_t> &sc_freq,
+    const std::unordered_map<SM50_INDEX_BUFFER_FORAMT, uint32_t> &ibf_freq,
+    const std::unordered_map<IMTLD3D11BlendState *, uint32_t> &blend_freq,
+    std::unordered_map<Sha1Digest, std::unordered_set<Sha1Digest>> &input_req_to_layouts,
+    std::unordered_map<Sha1Digest, InputLayout *> &layout_by_sha1, std::unordered_set<Prediction> &previous_predictions,
+    uint32_t top_dsf = 3, uint32_t top_caf = 2, uint32_t top_sc = 2, uint32_t top_ibf = 2, uint32_t top_blend = 3
+) {
+  std::vector<Prediction> predictions;
+
+  // Bail out if we have no frequency data yet (cold boot)
+  if (dsf_freq.empty() || blend_freq.empty())
+    return predictions;
+
+  // --- Rank each field ---
+  auto ranked_dsf = top_n(dsf_freq, top_dsf);
+  auto ranked_sc = top_n(sc_freq, top_sc);
+  auto ranked_ibf = top_n(ibf_freq, top_ibf);
+  auto ranked_blend = top_n(blend_freq, top_blend);
+
+  // NCA from PS reflection
+  uint8_t nca = ps ? ps->ps_outs.count : 0;
+
+  // Per-slot color format rankings (only for slots [0..nca-1])
+  std::vector<std::vector<std::pair<uint32_t, WMTPixelFormat>>> ranked_caf(nca);
+  for (uint8_t i = 0; i < nca; i++) {
+    if (!caf_freq[i].empty())
+      ranked_caf[i] = top_n(caf_freq[i], top_caf);
+    else
+      ranked_caf[i] = {{0, WMTPixelFormatRGBA8Unorm}}; // fallback
+  }
+
+  // --- VS-compatible input layouts ---
+  std::vector<InputLayout *> valid_ils;
+  auto vs_sig = HashVSInputRequirement(vs->vs_input_req);
+  auto it = input_req_to_layouts.find(vs_sig);
+  if (it != input_req_to_layouts.end()) {
+    for (const auto &sha1 : it->second) {
+      auto jt = layout_by_sha1.find(sha1);
+      if (jt != layout_by_sha1.end())
+        valid_ils.push_back(jt->second);
+    }
+  }
+  if (valid_ils.empty()) {
+    if (vs->vs_input_req.elements.empty())
+      valid_ils.push_back(nullptr);
+    else
+      return predictions;
+  }
+
+  // --- Build all candidates as (joint_score, desc) pairs ---
+  // Joint score = product of per-field counts, used for ranking before cap.
+  std::vector<std::pair<uint64_t, MTL_GRAPHICS_PIPELINE_DESC>> candidates;
+
+  for (const auto &[dsf_cnt, dsf] : ranked_dsf)
+    for (const auto &[sc_cnt, sc] : ranked_sc)
+      for (const auto &[ibf_cnt, ibf] : ranked_ibf)
+        for (const auto &[blend_cnt, bs] : ranked_blend)
+          for (auto *il : valid_ils) {
+            // Build the color format combination for this candidate.
+            // We iterate over the Cartesian product of per-slot rankings.
+            // For nca=0 there are no color slots, so one iteration with empty formats.
+            // For nca>0 we recurse via a small stack to avoid deep nesting.
+
+            // Collect per-slot candidates into a flat list we can iterate.
+            // Use a simple index-vector approach to enumerate the product.
+            std::vector<size_t> slot_sizes(nca);
+            for (uint8_t s = 0; s < nca; s++)
+              slot_sizes[s] = ranked_caf[s].size();
+
+            // Total color combinations = product of slot sizes (or 1 if nca=0)
+            size_t color_combos = 1;
+            for (auto sz : slot_sizes)
+              color_combos *= sz;
+
+            for (size_t ci = 0; ci < color_combos; ci++) {
+              // Decode the combination index into per-slot indices
+              std::array<WMTPixelFormat, 8> formats{};
+              uint64_t color_score = 1;
+              size_t rem = ci;
+              for (int s = (int)nca - 1; s >= 0; s--) {
+                size_t idx = rem % slot_sizes[s];
+                rem /= slot_sizes[s];
+                formats[s] = ranked_caf[s][idx].second;
+                color_score *= ranked_caf[s][idx].first;
+              }
+              // Unused slots: Invalid
+              for (uint8_t s = nca; s < 8; s++)
+                formats[s] = WMTPixelFormatInvalid;
+
+              MTL_GRAPHICS_PIPELINE_DESC desc{};
+              desc.VertexShader = vs;
+              desc.PixelShader = ps;
+              desc.HullShader = nullptr;
+              desc.DomainShader = nullptr;
+              desc.GeometryShader = nullptr;
+
+              desc.NumColorAttachments = nca;
+              for (uint8_t s = 0; s < 8; s++)
+                desc.ColorAttachmentFormats[s] = formats[s];
+
+              desc.DepthStencilFormat = dsf;
+              desc.SampleCount = sc;
+              desc.IndexBufferFormat = ibf;
+              desc.BlendState = bs;
+              desc.InputLayout = il;
+
+              lock_shader_deterministic_fields(&desc);
+              desc.TopologyClass = WMTPrimitiveTopologyClassTriangle;
+
+              // Joint score: product of all per-field counts
+              uint64_t score = (uint64_t)dsf_cnt * sc_cnt * ibf_cnt * blend_cnt * color_score;
+              candidates.push_back({score, desc});
+            }
+          }
+
+  // --- Sort by joint score descending ---
+  std::sort(candidates.begin(), candidates.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+
+  // --- Apply cap (set kPerFieldModeMaxCandidates = 0 to disable) ---
+  size_t limit = (kPerFieldModeMaxCandidates > 0) ? std::min((size_t)kPerFieldModeMaxCandidates, candidates.size())
+                                                  : candidates.size();
+
+  for (size_t i = 0; i < limit; i++) {
+    Prediction pred{candidates[i].second};
+    if (previous_predictions.count(pred) == 0) {
+      predictions.push_back(pred);
+      previous_predictions.insert(pred);
+      Logger::info(str::format("PREDICTED: ", format_desc(pred.pDesc)));
+    }
+  }
+
+  return predictions;
+}
+
 } // namespace dxmt

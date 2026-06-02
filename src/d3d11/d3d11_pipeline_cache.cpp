@@ -256,6 +256,10 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   std::unordered_map<MTL_GRAPHICS_PIPELINE_DESC, uint32_t> descriptor_freq_table_;
   std::unordered_map<RenderPassSignature, uint32_t> rps_freq_table_;
   std::unordered_map<IMTLD3D11BlendState*, uint32_t> blend_freq_table_;
+  std::unordered_map<WMTPixelFormat, uint32_t>          dsf_freq_table_;
+  std::array<std::unordered_map<WMTPixelFormat, uint32_t>, 8> caf_freq_table_;
+  std::unordered_map<uint8_t, uint32_t>                 sc_freq_table_;
+  std::unordered_map<SM50_INDEX_BUFFER_FORAMT, uint32_t> ibf_freq_table_;
   int misses_;
 
   CachedSM50Shader *CreateShader(const void *pBytecode,
@@ -317,15 +321,16 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     for (const auto& ps_name: vs_to_ps_map_[vs_name]) {
       if (ps_name.has_value() && pixel_shaders_.count(ps_name.value()) == 0) continue;
       ManagedShader ps = ps_name.has_value() ? shaders_[pixel_shaders_[ps_name.value()]].get() : nullptr;
-      auto predictions = predictor_most_frequent_rps_blend(
+      auto predictions = predictor_per_field_mode(
         managed_shader, ps,
-        rps_freq_table_,
+        dsf_freq_table_,
+        caf_freq_table_,
+        sc_freq_table_,
+        ibf_freq_table_,
         blend_freq_table_,
         input_requirement_to_layouts_,
         layout_by_sha1_,
-        previous_predictions_,
-        /*top_rps=*/3,
-        /*top_blend=*/3);
+        previous_predictions_);
       // Logger::info(str::format("Is default blend desc nullptr? ", blend_states.cache[kDefaultBlendDesc].get() == nullptr));
 
       for (auto prediction: predictions) {
@@ -363,15 +368,16 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     for (const auto& vs_name: ps_to_vs_map_[ps_name]) {
       if (vertex_shaders_.count(vs_name) == 0) continue;
       ManagedShader vs = shaders_[vertex_shaders_[vs_name]].get();
-      auto predictions = predictor_most_frequent_rps_blend(
+      auto predictions = predictor_per_field_mode(
         vs, managed_shader,
-        rps_freq_table_,
+        dsf_freq_table_,
+        caf_freq_table_,
+        sc_freq_table_,
+        ibf_freq_table_,
         blend_freq_table_,
         input_requirement_to_layouts_,
         layout_by_sha1_,
-        previous_predictions_,
-        /*top_rps=*/3,
-        /*top_blend=*/3);
+        previous_predictions_);
       // Logger::info(str::format("Is default blend desc nullptr? ", blend_states.cache[kDefaultBlendDesc].get() == nullptr));
       
       for (auto prediction: predictions) {
@@ -467,15 +473,16 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       for (const auto& ps_name: vs_to_ps_map_[vs_name]) {
         if (ps_name.has_value() && pixel_shaders_.count(ps_name.value()) == 0) continue;
         ManagedShader ps = ps_name.has_value() ? shaders_[pixel_shaders_[ps_name.value()]].get() : nullptr;
-        auto predictions = predictor_most_frequent_rps_blend(
+        auto predictions = predictor_per_field_mode(
           shaders_[vertex_shaders_[vs_name]].get(), ps,
-          rps_freq_table_,
+          dsf_freq_table_,
+          caf_freq_table_,
+          sc_freq_table_,
+          ibf_freq_table_,
           blend_freq_table_,
           input_requirement_to_layouts_,
           layout_by_sha1_,
-          previous_predictions_,
-          /*top_rps=*/3,
-          /*top_blend=*/3);
+          previous_predictions_);
 
         for (auto prediction: predictions) {
           MTLCompiledGraphicsPipeline *dummyPipeline;
@@ -565,6 +572,11 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     anon.VertexShader = anon.PixelShader = anon.HullShader
                       = anon.DomainShader = anon.GeometryShader = nullptr;
     descriptor_freq_table_[anon]++;
+    dsf_freq_table_[pDesc->DepthStencilFormat]++;
+    sc_freq_table_[pDesc->SampleCount]++;
+    ibf_freq_table_[pDesc->IndexBufferFormat]++;
+    for (uint8_t i = 0; i < pDesc->NumColorAttachments; i++)
+        caf_freq_table_[i][pDesc->ColorAttachmentFormats[i]]++;
 
     if (!fromCache) {
       auto vs_name = pDesc->VertexShader->sha1().string().substr(0, 8);
