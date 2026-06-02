@@ -252,7 +252,10 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   std::unordered_map<Sha1Digest, InputLayout*> layout_by_sha1_;
 
   std::unordered_set<Prediction> previous_predictions_;
+  std::unordered_set<MTL_GRAPHICS_PIPELINE_DESC> missed_predictions_;
   std::unordered_map<MTL_GRAPHICS_PIPELINE_DESC, uint32_t> descriptor_freq_table_;
+  std::unordered_map<RenderPassSignature, uint32_t> rps_freq_table_;
+  std::unordered_map<IMTLD3D11BlendState*, uint32_t> blend_freq_table_;
   int misses_;
 
   CachedSM50Shader *CreateShader(const void *pBytecode,
@@ -314,11 +317,15 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     for (const auto& ps_name: vs_to_ps_map_[vs_name]) {
       if (ps_name.has_value() && pixel_shaders_.count(ps_name.value()) == 0) continue;
       ManagedShader ps = ps_name.has_value() ? shaders_[pixel_shaders_[ps_name.value()]].get() : nullptr;
-      auto predictions = predictor_most_frequent_global(
+      auto predictions = predictor_most_frequent_rps_blend(
         managed_shader, ps,
-        descriptor_freq_table_,
+        rps_freq_table_,
+        blend_freq_table_,
+        input_requirement_to_layouts_,
+        layout_by_sha1_,
         previous_predictions_,
-        /*top_n=*/5);
+        /*top_rps=*/3,
+        /*top_blend=*/3);
       // Logger::info(str::format("Is default blend desc nullptr? ", blend_states.cache[kDefaultBlendDesc].get() == nullptr));
 
       for (auto prediction: predictions) {
@@ -356,11 +363,15 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     for (const auto& vs_name: ps_to_vs_map_[ps_name]) {
       if (vertex_shaders_.count(vs_name) == 0) continue;
       ManagedShader vs = shaders_[vertex_shaders_[vs_name]].get();
-      auto predictions = predictor_most_frequent_global(
+      auto predictions = predictor_most_frequent_rps_blend(
         vs, managed_shader,
-        descriptor_freq_table_,
+        rps_freq_table_,
+        blend_freq_table_,
+        input_requirement_to_layouts_,
+        layout_by_sha1_,
         previous_predictions_,
-        /*top_n=*/5);
+        /*top_rps=*/3,
+        /*top_blend=*/3);
       // Logger::info(str::format("Is default blend desc nullptr? ", blend_states.cache[kDefaultBlendDesc].get() == nullptr));
       
       for (auto prediction: predictions) {
@@ -456,11 +467,15 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       for (const auto& ps_name: vs_to_ps_map_[vs_name]) {
         if (ps_name.has_value() && pixel_shaders_.count(ps_name.value()) == 0) continue;
         ManagedShader ps = ps_name.has_value() ? shaders_[pixel_shaders_[ps_name.value()]].get() : nullptr;
-        auto predictions = predictor_most_frequent_global(
+        auto predictions = predictor_most_frequent_rps_blend(
           shaders_[vertex_shaders_[vs_name]].get(), ps,
-          descriptor_freq_table_,
+          rps_freq_table_,
+          blend_freq_table_,
+          input_requirement_to_layouts_,
+          layout_by_sha1_,
           previous_predictions_,
-          /*top_n=*/5);
+          /*top_rps=*/3,
+          /*top_blend=*/3);
 
         for (auto prediction: predictions) {
           MTLCompiledGraphicsPipeline *dummyPipeline;
@@ -525,7 +540,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       *ppPipeline = iter->second.get();
 
       auto it = previous_predictions_.find(Prediction{*pDesc});
-      if (it != previous_predictions_.end()) {
+      if (it != previous_predictions_.end() && missed_predictions_.count(*pDesc) == 0) {
           const_cast<Prediction&>(*it).hit = true;
       }
       return;
@@ -535,14 +550,20 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     if (previous_predictions_.count(Prediction{*pDesc}) == 0) {
       Logger::info(str::format("REAL DRAW (no prediction match): ", format_desc(*pDesc)));
       ++misses_;
+      missed_predictions_.insert(*pDesc);
     }
 
+    auto rps = RenderPassSignature::from_desc(*pDesc);
+    rps_freq_table_[rps]++;
+
+    // Blend frequency — pointer is stable (deduped by StateObjectCache)
+    if (pDesc->BlendState)
+        blend_freq_table_[pDesc->BlendState]++;
+
+    // Existing full-descriptor frequency table
     MTL_GRAPHICS_PIPELINE_DESC anon = *pDesc;
-    anon.VertexShader   = nullptr;
-    anon.PixelShader    = nullptr;
-    anon.HullShader     = nullptr;
-    anon.DomainShader   = nullptr;
-    anon.GeometryShader = nullptr;
+    anon.VertexShader = anon.PixelShader = anon.HullShader
+                      = anon.DomainShader = anon.GeometryShader = nullptr;
     descriptor_freq_table_[anon]++;
 
     if (!fromCache) {
@@ -1047,7 +1068,10 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     Logger::info(str::format("Num predictions: ", previous_predictions_.size()));
     int hits = 0;
     for (const auto prediction: previous_predictions_) {
-      if (prediction.hit) ++hits;
+      if (prediction.hit) {
+        Logger::info(str::format("Prediction hit on: ", format_desc(prediction.pDesc)));
+        ++hits;
+      }
     }
 
     Logger::info(str::format("Hits: ", hits));
