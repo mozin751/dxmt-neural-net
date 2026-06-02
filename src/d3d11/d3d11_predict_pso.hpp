@@ -337,4 +337,48 @@ std::vector<Prediction> predictor_reflection_and_default(ManagedShader vs, Manag
   return predictions;
 }
 
+// Returns the top_n most frequently observed descriptors globally,
+// with vs/ps substituted in. Shader handles are stripped before counting
+// so descriptors from different pairs are comparable.
+std::vector<Prediction> predictor_most_frequent_global(
+    ManagedShader vs,
+    ManagedShader ps,
+    std::unordered_map<MTL_GRAPHICS_PIPELINE_DESC, uint32_t>& freq_table,
+    std::unordered_set<Prediction>& previous_predictions,
+    uint32_t top_n = 5)
+{
+    // Build a sorted list of (count, desc) pairs
+    std::vector<std::pair<uint32_t, MTL_GRAPHICS_PIPELINE_DESC>> ranked;
+    ranked.reserve(freq_table.size());
+    for (const auto& [desc, count] : freq_table)
+        ranked.push_back({count, desc});
+
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+
+    std::vector<Prediction> predictions;
+    for (uint32_t i = 0; i < std::min(top_n, (uint32_t)ranked.size()); i++) {
+        MTL_GRAPHICS_PIPELINE_DESC desc = ranked[i].second;
+
+        // Substitute the new pair's shaders
+        desc.VertexShader   = vs;
+        desc.PixelShader    = ps;
+        desc.HullShader     = nullptr;
+        desc.DomainShader   = nullptr;
+        desc.GeometryShader = nullptr;
+
+        // Re-lock deterministic fields for this specific pair
+        lock_shader_deterministic_fields(&desc);
+
+        Prediction pred{desc};
+        if (previous_predictions.count(pred) == 0) {
+            Logger::info(str::format("PREDICTED: ", format_desc(pred.pDesc)));
+            predictions.push_back(pred);
+            previous_predictions.insert(pred);
+        }
+    }
+
+    return predictions;
 }
+
+} // namespace dxmt
