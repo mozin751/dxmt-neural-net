@@ -29,6 +29,7 @@ public:
   virtual void
   GetTessellationPipeline(MTL_GRAPHICS_PIPELINE_DESC *pDesc, MTLCompiledTessellationMeshPipeline **ppPipeline) = 0;
   virtual void GetComputePipeline(MTL_COMPUTE_PIPELINE_DESC *pDesc, MTLCompiledComputePipeline **ppPipeline) = 0;
+//   virtual void OnRenderPassTransition(const RenderPassSignature& new_rps, IMTLD3D11BlendState* blend) = 0;
 };
 
 std::unique_ptr<MTLD3D11PipelineCacheBase>

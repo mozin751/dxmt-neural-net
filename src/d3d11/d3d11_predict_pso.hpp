@@ -63,6 +63,15 @@ struct RenderPassSignature {
   }
 };
 
+template <typename A, typename B>
+struct PairHash {
+    size_t operator()(const std::pair<A, B>& p) const noexcept {
+        size_t h = std::hash<A>{}(p.first);
+        h ^= std::hash<B>{}(p.second) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
 } // namespace dxmt
 
 namespace std {
@@ -90,6 +99,154 @@ template <> struct hash<dxmt::RenderPassSignature> {
 } // namespace std
 
 namespace dxmt {
+
+  static bool wmt_pixel_format_is_integer(WMTPixelFormat fmt) {
+    switch (fmt) {
+    // Unsigned integer formats
+    case WMTPixelFormatR8Uint:
+    case WMTPixelFormatR16Uint:
+    case WMTPixelFormatR32Uint:
+    case WMTPixelFormatRG8Uint:
+    case WMTPixelFormatRG16Uint:
+    case WMTPixelFormatRG32Uint:
+    case WMTPixelFormatRGBA8Uint:
+    case WMTPixelFormatRGBA16Uint:
+    case WMTPixelFormatRGBA32Uint:
+    // Signed integer formats
+    case WMTPixelFormatR8Sint:
+    case WMTPixelFormatR16Sint:
+    case WMTPixelFormatR32Sint:
+    case WMTPixelFormatRG8Sint:
+    case WMTPixelFormatRG16Sint:
+    case WMTPixelFormatRG32Sint:
+    case WMTPixelFormatRGBA8Sint:
+    case WMTPixelFormatRGBA16Sint:
+    case WMTPixelFormatRGBA32Sint:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool wmt_pixel_format_is_unsigned_integer(WMTPixelFormat fmt) {
+    switch (fmt) {
+    case WMTPixelFormatR8Uint:
+    case WMTPixelFormatR16Uint:
+    case WMTPixelFormatR32Uint:
+    case WMTPixelFormatRG8Uint:
+    case WMTPixelFormatRG16Uint:
+    case WMTPixelFormatRG32Uint:
+    case WMTPixelFormatRGBA8Uint:
+    case WMTPixelFormatRGBA16Uint:
+    case WMTPixelFormatRGBA32Uint:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool wmt_pixel_format_is_signed_integer(WMTPixelFormat fmt) {
+    switch (fmt) {
+    case WMTPixelFormatR8Sint:
+    case WMTPixelFormatR16Sint:
+    case WMTPixelFormatR32Sint:
+    case WMTPixelFormatRG8Sint:
+    case WMTPixelFormatRG16Sint:
+    case WMTPixelFormatRG32Sint:
+    case WMTPixelFormatRGBA8Sint:
+    case WMTPixelFormatRGBA16Sint:
+    case WMTPixelFormatRGBA32Sint:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool blend_compatible_with_ps(
+    IMTLD3D11BlendState* bs,
+    uint8_t nca,
+    uint32_t ps_valid_render_targets)
+{
+    if (!bs) return true;
+    D3D11_BLEND_DESC1 bd;
+    bs->GetDesc1(&bd);
+
+    if (!bd.IndependentBlendEnable) {
+        // Only RT[0] applies to slot 0, all other slots are irrelevant
+        const auto& rt = bd.RenderTarget[0];
+        bool slot0_active = rt.BlendEnable || rt.RenderTargetWriteMask != 0;
+        if (!slot0_active) return true;
+        bool slot0_bound  = nca > 0;
+        bool ps_writes_0  = (ps_valid_render_targets & 1) != 0;
+        if (slot0_active && slot0_bound && !ps_writes_0) return false;
+        if (slot0_active && !slot0_bound)                return false;
+        return true;
+    }
+
+    // IndependentBlendEnable=true: check each slot individually
+    for (uint8_t slot = 0; slot < 8; slot++) {
+        const auto& rt = bd.RenderTarget[slot];
+        bool slot_active = rt.BlendEnable || rt.RenderTargetWriteMask != 0;
+        if (!slot_active) continue;
+        bool slot_bound  = slot < nca;
+        bool ps_writes   = (ps_valid_render_targets >> slot) & 1;
+        if (slot_active && slot_bound && !ps_writes) return false;
+        if (slot_active && !slot_bound)              return false;
+    }
+    return true;
+}
+
+static bool rps_compatible_with_ps(
+    const RenderPassSignature& rps,
+    ManagedShader ps)
+{
+    // Count how many slots actually have a real (non-Invalid) format.
+    uint8_t real_attachments = 0;
+    for (uint8_t i = 0; i < rps.num_color_attachments; i++) {
+        if (rps.color_formats[i] != WMTPixelFormatInvalid)
+            real_attachments++;
+    }
+
+    if (!ps) {
+        // No PS: only valid if no real color attachments.
+        return true;
+    }
+
+    const auto& outs = ps->ps_outs;
+
+    // PS output count must cover all real (non-Invalid) slots.
+    if (real_attachments > outs.count)
+        return false;
+
+    // Per-slot format class check — only for non-Invalid slots.
+    for (uint8_t slot = 0; slot < rps.num_color_attachments; slot++) {
+        WMTPixelFormat fmt = rps.color_formats[slot];
+        if (fmt == WMTPixelFormatInvalid)
+            continue;
+
+        ScalarClass cls = outs.classes[slot];
+
+        switch (cls) {
+        case ScalarClass::None:
+            return false;
+        case ScalarClass::Float:
+            if (wmt_pixel_format_is_integer(fmt))
+                return false;
+            break;
+        case ScalarClass::UInt:
+            if (!wmt_pixel_format_is_unsigned_integer(fmt))
+                return false;
+            break;
+        case ScalarClass::SInt:
+            if (!wmt_pixel_format_is_signed_integer(fmt))
+                return false;
+            break;
+        }
+    }
+
+    return true;
+}
+
 static std::string
 format_desc(const MTL_GRAPHICS_PIPELINE_DESC &d) {
   std::string s;
@@ -557,7 +714,7 @@ predictor_most_frequent_rps_blend(
 
 // Controls whether the cross-product is capped.
 // Set to 0 to disable the cap and emit all combinations.
-constexpr uint32_t kPerFieldModeMaxCandidates = 10;
+constexpr uint32_t kPerFieldModeMaxCandidates = 20;
 
 template <typename T>
 static std::vector<std::pair<uint32_t, T>>
@@ -701,13 +858,113 @@ predictor_per_field_mode(
   for (size_t i = 0; i < limit; i++) {
     Prediction pred{candidates[i].second};
     if (previous_predictions.count(pred) == 0) {
+      if (candidates[i].second.PixelShader && !blend_compatible_with_ps(candidates[i].second.BlendState, candidates[i].second.PixelShader->ps_outs.count, candidates[i].second.PixelShader->reflection().PSValidRenderTargets))
+        continue;
       predictions.push_back(pred);
       previous_predictions.insert(pred);
-      Logger::info(str::format("PREDICTED: ", format_desc(pred.pDesc)));
+      // Logger::info(str::format("Is rps compatible with this ps? ", rps_compatible_with_ps(
+      //       RenderPassSignature::from_desc(pred.pDesc),
+      // pred.pDesc.PixelShader)));
+      // Logger::info(str::format("PREDICTED: ", format_desc(pred.pDesc)));
     }
   }
 
   return predictions;
+}
+
+std::vector<Prediction> predictor_ps_rps_blend_history(
+    ManagedShader vs,
+    ManagedShader ps,
+    const std::unordered_map<Sha1Digest,
+        std::unordered_map<std::pair<RenderPassSignature, IMTLD3D11BlendState*>, uint32_t,
+            PairHash<RenderPassSignature, IMTLD3D11BlendState*>>>& ps_rps_blend_table,
+    std::unordered_map<Sha1Digest, std::unordered_set<Sha1Digest>>& input_req_to_layouts,
+    std::unordered_map<Sha1Digest, InputLayout*>& layout_by_sha1,
+    std::unordered_set<Prediction>& previous_predictions,
+    uint32_t top_k = 3)
+{
+    std::vector<Prediction> predictions;
+
+    if (!ps) return predictions;
+
+    // Look up this PS's historical (RPS, blend) pairs.
+    auto ps_it = ps_rps_blend_table.find(ps->sha1());
+    if (ps_it == ps_rps_blend_table.end())
+        return predictions;  // never seen this PS before — emit nothing
+
+    const auto& rps_blend_map = ps_it->second;
+
+    // Rank by frequency, take top-k.
+    std::vector<std::pair<uint32_t, std::pair<RenderPassSignature, IMTLD3D11BlendState*>>> ranked;
+    ranked.reserve(rps_blend_map.size());
+    for (const auto& [key, count] : rps_blend_map)
+        ranked.push_back({count, key});
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b){ return a.first > b.first; });
+
+    uint32_t limit = std::min(top_k, (uint32_t)ranked.size());
+
+    // VS-compatible input layouts.
+    std::vector<InputLayout*> valid_ils;
+    auto vs_sig = HashVSInputRequirement(vs->vs_input_req);
+    auto il_it = input_req_to_layouts.find(vs_sig);
+    if (il_it != input_req_to_layouts.end()) {
+        for (const auto& sha1 : il_it->second) {
+            auto jt = layout_by_sha1.find(sha1);
+            if (jt != layout_by_sha1.end())
+                valid_ils.push_back(jt->second);
+        }
+    }
+    if (valid_ils.empty()) {
+        if (vs->vs_input_req.elements.empty())
+            valid_ils.push_back(nullptr);
+        else
+            return predictions;  // no known layouts yet — emit nothing
+    }
+
+    // Cross-product: top-k (RPS, blend) × compatible ILs × {NONE, UINT16}.
+    for (uint32_t i = 0; i < limit; i++) {
+        const auto& [rps, blend] = ranked[i].second;
+
+        for (auto* il : valid_ils) {
+            for (auto ibf : {SM50_INDEX_BUFFER_FORMAT_NONE,
+                             SM50_INDEX_BUFFER_FORMAT_UINT16}) {
+
+                MTL_GRAPHICS_PIPELINE_DESC desc{};
+                desc.VertexShader   = vs;
+                desc.PixelShader    = ps;
+                desc.HullShader     = nullptr;
+                desc.DomainShader   = nullptr;
+                desc.GeometryShader = nullptr;
+
+                desc.NumColorAttachments = rps.num_color_attachments;
+                for (uint8_t s = 0; s < 8; s++)
+                    desc.ColorAttachmentFormats[s] =
+                        (s < rps.num_color_attachments)
+                        ? rps.color_formats[s]
+                        : WMTPixelFormatInvalid;
+                desc.DepthStencilFormat = rps.depth_stencil_format;
+                desc.SampleCount        = rps.sample_count;
+                desc.BlendState         = blend;
+                desc.InputLayout        = il;
+                desc.IndexBufferFormat  = ibf;
+                desc.TopologyClass      = WMTPrimitiveTopologyClassTriangle;
+                desc.RasterizationEnabled = (ps != nullptr);
+                desc.SampleMask         = 0xFFFFFFFF;
+
+                lock_shader_deterministic_fields(&desc);
+
+                Prediction pred{desc};
+                if (previous_predictions.count(pred) == 0) {
+                    predictions.push_back(pred);
+                    previous_predictions.insert(pred);
+                    // Logger::info(str::format("PREDICTED: ", format_desc(pred.pDesc)));
+                }
+            }
+        }
+    }
+
+    return predictions;
 }
 
 } // namespace dxmt
