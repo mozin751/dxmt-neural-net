@@ -100,7 +100,39 @@ template <> struct hash<dxmt::RenderPassSignature> {
 
 namespace dxmt {
 
-  static bool wmt_pixel_format_is_integer(WMTPixelFormat fmt) {
+static std::string format_blend_desc(IMTLD3D11BlendState* bs) {
+    if (!bs) return "null";
+    D3D11_BLEND_DESC1 bd;
+    bs->GetDesc1(&bd);
+    
+    std::string s = str::format(
+        "AlphaToCoverage=", (uint32_t)bd.AlphaToCoverageEnable,
+        " IndepBlend=", (uint32_t)bd.IndependentBlendEnable,
+        "\n"
+    );
+    
+    for (uint8_t i = 0; i < 8; i++) {
+        const auto& rt = bd.RenderTarget[i];
+        s += str::format(
+            "  RT[", (uint32_t)i, "]:",
+            " BlendEnable=",      (uint32_t)rt.BlendEnable,
+            " LogicOpEnable=",    (uint32_t)rt.LogicOpEnable,
+            " SrcBlend=",         (uint32_t)rt.SrcBlend,
+            " DestBlend=",        (uint32_t)rt.DestBlend,
+            " BlendOp=",          (uint32_t)rt.BlendOp,
+            " SrcBlendAlpha=",    (uint32_t)rt.SrcBlendAlpha,
+            " DestBlendAlpha=",   (uint32_t)rt.DestBlendAlpha,
+            " BlendOpAlpha=",     (uint32_t)rt.BlendOpAlpha,
+            " LogicOp=",          (uint32_t)rt.LogicOp,
+            " WriteMask=",        (uint32_t)rt.RenderTargetWriteMask,
+            "\n"
+        );
+    }
+    
+    return s;
+}
+
+static bool wmt_pixel_format_is_integer(WMTPixelFormat fmt) {
     switch (fmt) {
     // Unsigned integer formats
     case WMTPixelFormatR8Uint:
@@ -165,9 +197,20 @@ static bool wmt_pixel_format_is_signed_integer(WMTPixelFormat fmt) {
 static bool blend_compatible_with_ps(
     IMTLD3D11BlendState* bs,
     uint8_t nca,
-    uint32_t ps_valid_render_targets)
+    uint32_t ps_valid_render_targets,
+    const std::unordered_map<IMTLD3D11BlendState*, uint8_t>& blend_min_ps_outs)
 {
     if (!bs) return true;
+
+    // If we've observed this blend before, the minimum ps_outs.count
+    // seen with it is a hard lower bound — reject anything below it.
+    auto it = blend_min_ps_outs.find(bs);
+    if (it != blend_min_ps_outs.end()) {
+        if (ps_valid_render_targets < it->second)
+          return false;
+    }
+
+    
     D3D11_BLEND_DESC1 bd;
     bs->GetDesc1(&bd);
 
@@ -177,7 +220,7 @@ static bool blend_compatible_with_ps(
         bool slot0_active = rt.BlendEnable || rt.RenderTargetWriteMask != 0;
         if (!slot0_active) return true;
         bool slot0_bound  = nca > 0;
-        bool ps_writes_0  = (ps_valid_render_targets & 1) != 0;
+        bool ps_writes_0  = ps_valid_render_targets > 0;
         if (slot0_active && slot0_bound && !ps_writes_0) return false;
         if (slot0_active && !slot0_bound)                return false;
         return true;
@@ -738,6 +781,7 @@ predictor_per_field_mode(
     const std::unordered_map<IMTLD3D11BlendState *, uint32_t> &blend_freq,
     std::unordered_map<Sha1Digest, std::unordered_set<Sha1Digest>> &input_req_to_layouts,
     std::unordered_map<Sha1Digest, InputLayout *> &layout_by_sha1, std::unordered_set<Prediction> &previous_predictions,
+    const std::unordered_map<IMTLD3D11BlendState*, uint8_t>& blend_min_ps_outs,
     uint32_t top_dsf = 3, uint32_t top_caf = 2, uint32_t top_sc = 2, uint32_t top_ibf = 2, uint32_t top_blend = 3
 ) {
   std::vector<Prediction> predictions;
@@ -858,7 +902,7 @@ predictor_per_field_mode(
   for (size_t i = 0; i < limit; i++) {
     Prediction pred{candidates[i].second};
     if (previous_predictions.count(pred) == 0) {
-      if (candidates[i].second.PixelShader && !blend_compatible_with_ps(candidates[i].second.BlendState, candidates[i].second.PixelShader->ps_outs.count, candidates[i].second.PixelShader->reflection().PSValidRenderTargets))
+      if (candidates[i].second.PixelShader && !blend_compatible_with_ps(candidates[i].second.BlendState, candidates[i].second.PixelShader->ps_outs.count, candidates[i].second.PixelShader->reflection().PSValidRenderTargets, blend_min_ps_outs))
         continue;
       predictions.push_back(pred);
       previous_predictions.insert(pred);
@@ -958,13 +1002,142 @@ std::vector<Prediction> predictor_ps_rps_blend_history(
                 if (previous_predictions.count(pred) == 0) {
                     predictions.push_back(pred);
                     previous_predictions.insert(pred);
-                    // Logger::info(str::format("PREDICTED: ", format_desc(pred.pDesc)));
+                    Logger::info(str::format("PREDICTED: ", format_desc(pred.pDesc)));
                 }
             }
         }
     }
 
     return predictions;
+}
+
+std::vector<Prediction> predictor_global_rps_blend_compatible(
+    ManagedShader vs,
+    ManagedShader ps,
+    const std::unordered_map<RenderPassSignature,
+        std::unordered_map<IMTLD3D11BlendState*, uint32_t>>& rps_blend_table,
+    std::unordered_map<Sha1Digest, std::unordered_set<Sha1Digest>>& input_req_to_layouts,
+    std::unordered_map<Sha1Digest, InputLayout*>& layout_by_sha1,
+    std::unordered_set<Prediction>& previous_predictions,
+    const std::unordered_map<IMTLD3D11BlendState*, uint8_t>& blend_min_ps_outs,
+    uint32_t top_k = 3)
+{
+    std::vector<Prediction> predictions;
+    if (!ps) return predictions;
+
+    // Collect all (RPS, blend) pairs compatible with this PS, ranked by count
+    std::vector<std::pair<uint32_t, std::pair<RenderPassSignature, IMTLD3D11BlendState*>>> ranked;
+    uint32_t ps_vrt = ps->ps_outs.count;
+
+    for (const auto& [rps, blend_map] : rps_blend_table) {
+        if (!rps_compatible_with_ps(rps, ps))
+            continue;
+        for (const auto& [blend, count] : blend_map) {
+            if (!blend_compatible_with_ps(blend, rps.num_color_attachments, ps_vrt, blend_min_ps_outs))
+                continue;
+            ranked.push_back({count, {rps, blend}});
+        }
+    }
+
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b){ return a.first > b.first; });
+
+    // VS-compatible input layouts
+    std::vector<InputLayout*> valid_ils;
+    auto vs_sig = HashVSInputRequirement(vs->vs_input_req);
+    auto il_it = input_req_to_layouts.find(vs_sig);
+    if (il_it != input_req_to_layouts.end()) {
+        for (const auto& sha1 : il_it->second) {
+            auto jt = layout_by_sha1.find(sha1);
+            if (jt != layout_by_sha1.end())
+                valid_ils.push_back(jt->second);
+        }
+    }
+    if (valid_ils.empty()) {
+        if (vs->vs_input_req.elements.empty())
+            valid_ils.push_back(nullptr);
+        else
+            return predictions;
+    }
+
+    uint32_t limit = std::min(top_k, (uint32_t)ranked.size());
+
+    for (uint32_t i = 0; i < limit; i++) {
+        const auto& [rps, blend] = ranked[i].second;
+
+        for (auto* il : valid_ils) {
+            for (auto ibf : {SM50_INDEX_BUFFER_FORMAT_NONE,
+                             SM50_INDEX_BUFFER_FORMAT_UINT16}) {
+                MTL_GRAPHICS_PIPELINE_DESC desc{};
+                desc.VertexShader    = vs;
+                desc.PixelShader     = ps;
+                desc.HullShader      = nullptr;
+                desc.DomainShader    = nullptr;
+                desc.GeometryShader  = nullptr;
+
+                desc.NumColorAttachments = rps.num_color_attachments;
+                for (uint8_t s = 0; s < 8; s++)
+                    desc.ColorAttachmentFormats[s] =
+                        (s < rps.num_color_attachments)
+                        ? rps.color_formats[s]
+                        : WMTPixelFormatInvalid;
+                desc.DepthStencilFormat  = rps.depth_stencil_format;
+                desc.SampleCount         = rps.sample_count;
+                desc.BlendState          = blend;
+                desc.InputLayout         = il;
+                desc.IndexBufferFormat   = ibf;
+                desc.TopologyClass       = WMTPrimitiveTopologyClassTriangle;
+                desc.RasterizationEnabled = true;
+                desc.SampleMask          = 0xFFFFFFFF;
+
+                lock_shader_deterministic_fields(&desc);
+
+                Prediction pred{desc};
+                if (previous_predictions.count(pred) == 0) {
+                    predictions.push_back(pred);
+                    previous_predictions.insert(pred);
+                    Logger::info(str::format("PREDICTED: ", format_desc(pred.pDesc)));
+                }
+            }
+        }
+    }
+
+    return predictions;
+}
+
+std::vector<Prediction> predictor_composed(
+    ManagedShader vs,
+    ManagedShader ps,
+    const std::unordered_map<Sha1Digest,
+        std::unordered_map<std::pair<RenderPassSignature, IMTLD3D11BlendState*>, uint32_t,
+            PairHash<RenderPassSignature, IMTLD3D11BlendState*>>>& ps_rps_blend_table,
+    const std::unordered_map<RenderPassSignature,
+        std::unordered_map<IMTLD3D11BlendState*, uint32_t>>& rps_blend_table,
+    std::unordered_map<Sha1Digest, std::unordered_set<Sha1Digest>>& input_req_to_layouts,
+    std::unordered_map<Sha1Digest, InputLayout*>& layout_by_sha1,
+    std::unordered_set<Prediction>& previous_predictions,
+    const std::unordered_map<IMTLD3D11BlendState*, uint8_t>& blend_min_ps_outs,
+    uint32_t top_k = 3)
+{
+    if (!ps) return {};
+
+    bool ps_known = ps_rps_blend_table.count(ps->sha1()) > 0;
+
+    if (ps_known) {
+        return predictor_ps_rps_blend_history(
+            vs, ps,
+            ps_rps_blend_table,
+            input_req_to_layouts, layout_by_sha1,
+            previous_predictions, top_k);
+    } else {
+        return predictor_global_rps_blend_compatible(
+            vs, ps,
+            rps_blend_table,
+            input_req_to_layouts, layout_by_sha1,
+            previous_predictions,
+            blend_min_ps_outs,
+            top_k);
+    }
 }
 
 } // namespace dxmt

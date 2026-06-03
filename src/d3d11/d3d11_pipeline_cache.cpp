@@ -265,6 +265,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   std::unordered_map<Sha1Digest,
   std::unordered_map<std::pair<RenderPassSignature, IMTLD3D11BlendState*>, uint32_t,
     PairHash<RenderPassSignature, IMTLD3D11BlendState*>>> ps_rps_blend_table_;
+  std::unordered_map<IMTLD3D11BlendState*, uint8_t> blend_min_ps_outs_;
   int misses_;
 
   CachedSM50Shader *CreateShader(const void *pBytecode,
@@ -326,13 +327,15 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     for (const auto& ps_name: vs_to_ps_map_[vs_name]) {
       if (ps_name.has_value() && pixel_shaders_.count(ps_name.value()) == 0) continue;
       ManagedShader ps = ps_name.has_value() ? shaders_[pixel_shaders_[ps_name.value()]].get() : nullptr;
-      auto predictions =  predictor_ps_rps_blend_history(
+      auto predictions =  predictor_composed(
         managed_shader, ps,
         ps_rps_blend_table_,
+        rps_blend_table_,
         input_requirement_to_layouts_,
         layout_by_sha1_,
         previous_predictions_,
-        /*top_k=*/3);
+        blend_min_ps_outs_,
+        /*top_k=*/5);
       // Logger::info(str::format("Is default blend desc nullptr? ", blend_states.cache[kDefaultBlendDesc].get() == nullptr));
 
       for (auto prediction: predictions) {
@@ -370,13 +373,15 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     for (const auto& vs_name: ps_to_vs_map_[ps_name]) {
       if (vertex_shaders_.count(vs_name) == 0) continue;
       ManagedShader vs = shaders_[vertex_shaders_[vs_name]].get();
-      auto predictions =  predictor_ps_rps_blend_history(
+      auto predictions =  predictor_composed(
         vs, managed_shader,
         ps_rps_blend_table_,
+        rps_blend_table_,
         input_requirement_to_layouts_,
         layout_by_sha1_,
         previous_predictions_,
-        /*top_k=*/3);
+        blend_min_ps_outs_,
+        /*top_k=*/5);
       // Logger::info(str::format("Is default blend desc nullptr? ", blend_states.cache[kDefaultBlendDesc].get() == nullptr));
       
       for (auto prediction: predictions) {
@@ -472,13 +477,15 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       for (const auto& ps_name: vs_to_ps_map_[vs_name]) {
         if (ps_name.has_value() && pixel_shaders_.count(ps_name.value()) == 0) continue;
         ManagedShader ps = ps_name.has_value() ? shaders_[pixel_shaders_[ps_name.value()]].get() : nullptr;
-        auto predictions =  predictor_ps_rps_blend_history(
+        auto predictions =  predictor_composed(
           shaders_[vertex_shaders_[vs_name]].get(), ps,
           ps_rps_blend_table_,
+          rps_blend_table_,
           input_requirement_to_layouts_,
           layout_by_sha1_,
           previous_predictions_,
-          /*top_k=*/3);
+          blend_min_ps_outs_,
+          /*top_k=*/5);
 
         for (auto prediction: predictions) {
           MTLCompiledGraphicsPipeline *dummyPipeline;
@@ -544,7 +551,37 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 
       auto it = previous_predictions_.find(Prediction{*pDesc});
       if (it != previous_predictions_.end() && missed_predictions_.count(*pDesc) == 0) {
+        auto pred = const_cast<Prediction&>(*it);
+
+        if (!pred.hit) {
           const_cast<Prediction&>(*it).hit = true;
+          auto desc = pred.pDesc;
+          if (desc.PixelShader) {
+            auto key = std::make_pair(RenderPassSignature::from_desc(desc), desc.BlendState);
+            ps_rps_blend_table_[desc.PixelShader->sha1()][key]++;
+          }
+
+          auto rps = RenderPassSignature::from_desc(desc);
+          rps_freq_table_[rps]++;
+
+          // Blend frequency — pointer is stable (deduped by StateObjectCache)
+          if (desc.BlendState)
+              blend_freq_table_[desc.BlendState]++;
+
+          if (desc.BlendState)
+              rps_blend_table_[rps][desc.BlendState]++;
+
+          // Existing full-descriptor frequency table
+          MTL_GRAPHICS_PIPELINE_DESC anon = desc;
+          anon.VertexShader = anon.PixelShader = anon.HullShader
+                            = anon.DomainShader = anon.GeometryShader = nullptr;
+          descriptor_freq_table_[anon]++;
+          dsf_freq_table_[desc.DepthStencilFormat]++;
+          sc_freq_table_[desc.SampleCount]++;
+          ibf_freq_table_[desc.IndexBufferFormat]++;
+          for (uint8_t i = 0; i < desc.NumColorAttachments; i++)
+              caf_freq_table_[i][desc.ColorAttachmentFormats[i]]++; 
+        }
       }
       return;
     }
@@ -552,16 +589,38 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 
     // TEST CODE
 
+    // if (pDesc->PixelShader) {
+    //    auto ps_sha1 = pDesc->PixelShader->sha1();
+    
+    //   if (ps_rps_blend_table_.find(ps_sha1) == ps_rps_blend_table_.end()) {
+    //     auto rps = RenderPassSignature::from_desc(*pDesc);
+    //     IMTLD3D11BlendState* blend = pDesc->BlendState;
+
+    //     bool rps_seen        = rps_freq_table_.count(rps) > 0;
+    //     bool blend_seen      = blend_freq_table_.count(blend) > 0;
+    //     bool pair_seen       = rps_blend_table_.count(rps) > 0 &&
+    //                            rps_blend_table_.at(rps).count(blend) > 0;
+
+    //     Logger::info(str::format(
+    //         "New PS=", ps_sha1.string().substr(0, 8),
+    //         " rps_seen=", (uint32_t)rps_seen,
+    //         " blend_seen=", (uint32_t)blend_seen,
+    //         " pair_seen=", (uint32_t)pair_seen,
+    //         " scenario=",
+    //             (!rps_seen && !blend_seen)              ? "C" :
+    //             (rps_seen  && !blend_seen)              ? "B_rps" :
+    //             (!rps_seen && blend_seen)               ? "B_blend" :
+    //             (rps_seen  && blend_seen && pair_seen)  ? "A_pair" :
+    //                                                       "A_unpaired"
+    //     ));
+    // }
+    // }
+
     // if (pDesc->PixelShader)
       // Logger::info(str::format("Is blend compatible with this ps? ", blend_compatible_with_ps(pDesc->BlendState, pDesc->PixelShader->ps_outs.count, pDesc->PixelShader->reflection().PSValidRenderTargets)));
     // Logger::info(str::format("Is rps compatible with this ps? ", rps_compatible_with_ps(
     // RenderPassSignature::from_desc(*pDesc),
     // pDesc->PixelShader)));
-
-    if (pDesc->PixelShader) {
-      auto key = std::make_pair(RenderPassSignature::from_desc(*pDesc), pDesc->BlendState);
-      ps_rps_blend_table_[pDesc->PixelShader->sha1()][key]++;
-    }
     // Logger::info(str::format("PSValidRenderTargets: ", 
     //     pDesc->PixelShader->reflection().PSValidRenderTargets,
     //     " ps_outs.count: ", pDesc->PixelShader->ps_outs.count,
@@ -575,32 +634,49 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 
     // END OF TEST CODE
 
+
+    // Updating frequency tables
+
     if (previous_predictions_.count(Prediction{*pDesc}) == 0) {
-      Logger::info(str::format("REAL DRAW (no prediction match): ", format_desc(*pDesc)));
-      ++misses_;
-      missed_predictions_.insert(*pDesc);
-    }
+      if (pDesc->PixelShader) {
+        auto key = std::make_pair(RenderPassSignature::from_desc(*pDesc), pDesc->BlendState);
+        ps_rps_blend_table_[pDesc->PixelShader->sha1()][key]++;
+      }
 
-    auto rps = RenderPassSignature::from_desc(*pDesc);
-    rps_freq_table_[rps]++;
+      if (previous_predictions_.count(Prediction{*pDesc}) == 0) {
+        Logger::info(str::format("REAL DRAW (no prediction match): ", format_desc(*pDesc)));
+        ++misses_;
+        missed_predictions_.insert(*pDesc);
+      }
 
-    // Blend frequency — pointer is stable (deduped by StateObjectCache)
-    if (pDesc->BlendState)
+      auto rps = RenderPassSignature::from_desc(*pDesc);
+      rps_freq_table_[rps]++;
+
+      // Blend frequency — pointer is stable (deduped by StateObjectCache)
+      if (pDesc->BlendState) {
         blend_freq_table_[pDesc->BlendState]++;
-
-    if (pDesc->BlendState)
         rps_blend_table_[rps][pDesc->BlendState]++;
+        if (pDesc->PixelShader) {
+          uint8_t count = pDesc->PixelShader->ps_outs.count;
+          auto it = blend_min_ps_outs_.find(pDesc->BlendState);
+          if (it == blend_min_ps_outs_.end())
+              blend_min_ps_outs_[pDesc->BlendState] = count;
+          else
+              it->second = std::min(it->second, count);
+        }
+      }
 
-    // Existing full-descriptor frequency table
-    MTL_GRAPHICS_PIPELINE_DESC anon = *pDesc;
-    anon.VertexShader = anon.PixelShader = anon.HullShader
-                      = anon.DomainShader = anon.GeometryShader = nullptr;
-    descriptor_freq_table_[anon]++;
-    dsf_freq_table_[pDesc->DepthStencilFormat]++;
-    sc_freq_table_[pDesc->SampleCount]++;
-    ibf_freq_table_[pDesc->IndexBufferFormat]++;
-    for (uint8_t i = 0; i < pDesc->NumColorAttachments; i++)
-        caf_freq_table_[i][pDesc->ColorAttachmentFormats[i]]++;
+      // Existing full-descriptor frequency table
+      MTL_GRAPHICS_PIPELINE_DESC anon = *pDesc;
+      anon.VertexShader = anon.PixelShader = anon.HullShader
+                        = anon.DomainShader = anon.GeometryShader = nullptr;
+      descriptor_freq_table_[anon]++;
+      dsf_freq_table_[pDesc->DepthStencilFormat]++;
+      sc_freq_table_[pDesc->SampleCount]++;
+      ibf_freq_table_[pDesc->IndexBufferFormat]++;
+      for (uint8_t i = 0; i < pDesc->NumColorAttachments; i++)
+          caf_freq_table_[i][pDesc->ColorAttachmentFormats[i]]++; 
+    }
 
     if (!fromCache) {
       auto vs_name = pDesc->VertexShader->sha1().string().substr(0, 8);
@@ -1101,11 +1177,11 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     //   save_cache(pso_cache_, WMT::GetCacheDir() + "cache_map.bin");
     // }
 
-    // if (dirty_maps_) {
-    //   writeShaderPairMap(vs_to_ps_map_, WMT::GetCacheDir() + "vs_to_ps_map.bin");
-    //   writeShaderPairMap(ps_to_vs_map_, WMT::GetCacheDir() + "ps_to_vs_map.bin");
+    if (dirty_maps_) {
+      writeShaderPairMap(vs_to_ps_map_, WMT::GetCacheDir() + "vs_to_ps_map.bin");
+      writeShaderPairMap(ps_to_vs_map_, WMT::GetCacheDir() + "ps_to_vs_map.bin");
     //   writeCacheToDisk(WMT::GetCacheDir() + "shader_descriptor_map.bin");
-    // }
+    }
 
     Logger::info(str::format("Num predictions: ", previous_predictions_.size()));
     int hits = 0;
@@ -1121,26 +1197,44 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     Logger::info(str::format("Misses: ", misses_));
     Logger::info(str::format("Num pipelines: ", pipelines_.size()));
 
-    Logger::info(str::format("Num rps: ", rps_blend_table_.size()));
-    for (auto [rps, item]: rps_blend_table_) {
-      Logger::info(str::format("RPS: ", rps.to_string(), "count: ", rps_freq_table_[rps]));
+  //   Logger::info(str::format("Num rps: ", rps_blend_table_.size()));
+  //   for (auto [rps, item]: rps_blend_table_) {
+  //     Logger::info(str::format("RPS: ", rps.to_string(), "count: ", rps_freq_table_[rps]));
 
-      for (auto [blend, count]: item) {
-        Logger::info(str::format("\t ", blend, ". count: ", count));
-      }
-    }
+  //     for (auto [blend, count]: item) {
+  //       Logger::info(str::format("\t ", blend, ". count: ", count));
+  //     }
+  //   }
 
-    Logger::info("=== Per-PS (RPS, Blend) frequencies ===");
-    for (const auto& [ps_sha1, rps_blend_map] : ps_rps_blend_table_) {
-        Logger::info(str::format("PS=", ps_sha1.string().substr(0, 8),
-                                " distinct (RPS,blend) pairs: ", rps_blend_map.size()));
-        for (const auto& [key, count] : rps_blend_map) {
-            const auto& [rps, blend] = key;
-            Logger::info(str::format("  ", rps.to_string(),
-                                    " BLEND=", reinterpret_cast<uintptr_t>(blend),
-                                    " count=", count));
-        }
-    }
+  //   Logger::info("=== Per-PS (RPS, Blend) frequencies ===");
+  //   for (const auto& [ps_sha1, rps_blend_map] : ps_rps_blend_table_) {
+  //       Logger::info(str::format("PS=", ps_sha1.string().substr(0, 8),
+  //                               " distinct (RPS,blend) pairs: ", rps_blend_map.size()));
+  //       for (const auto& [key, count] : rps_blend_map) {
+  //           const auto& [rps, blend] = key;
+  //           Logger::info(str::format("  ", rps.to_string(),
+  //                                   " BLEND=", reinterpret_cast<uintptr_t>(blend),
+  //                                   " count=", count));
+  //       }
+  //   }
+
+  //   Logger::info("=== Observed (RPS, blend) pairs ===");
+  //   for (const auto& [rps, blend_map] : rps_blend_table_) {
+  //       for (const auto& [blend, count] : blend_map) {
+  //           Logger::info(str::format(
+  //               "  ", rps.to_string(),
+  //               " BLEND=", reinterpret_cast<uintptr_t>(blend),
+  //               " count=", count
+  //           ));
+  //       }
+  //   }
+  //   Logger::info(str::format("Total distinct (RPS, blend) pairs: ",
+  //       [&]() {
+  //           size_t total = 0;
+  //           for (const auto& [rps, bm] : rps_blend_table_) total += bm.size();
+  //           return total;
+  //       }()
+  //   ));
   }
 };
 
