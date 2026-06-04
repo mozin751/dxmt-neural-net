@@ -211,31 +211,31 @@ static bool blend_compatible_with_ps(
     }
 
     
-    D3D11_BLEND_DESC1 bd;
-    bs->GetDesc1(&bd);
+    // D3D11_BLEND_DESC1 bd;
+    // bs->GetDesc1(&bd);
 
-    if (!bd.IndependentBlendEnable) {
-        // Only RT[0] applies to slot 0, all other slots are irrelevant
-        const auto& rt = bd.RenderTarget[0];
-        bool slot0_active = rt.BlendEnable || rt.RenderTargetWriteMask != 0;
-        if (!slot0_active) return true;
-        bool slot0_bound  = nca > 0;
-        bool ps_writes_0  = ps_valid_render_targets > 0;
-        if (slot0_active && slot0_bound && !ps_writes_0) return false;
-        if (slot0_active && !slot0_bound)                return false;
-        return true;
-    }
+    // if (!bd.IndependentBlendEnable) {
+    //     // Only RT[0] applies to slot 0, all other slots are irrelevant
+    //     const auto& rt = bd.RenderTarget[0];
+    //     bool slot0_active = rt.BlendEnable || rt.RenderTargetWriteMask != 0;
+    //     if (!slot0_active) return true;
+    //     bool slot0_bound  = nca > 0;
+    //     bool ps_writes_0  = ps_valid_render_targets > 0;
+    //     if (slot0_active && slot0_bound && !ps_writes_0) return false;
+    //     if (slot0_active && !slot0_bound)                return false;
+    //     return true;
+    // }
 
-    // IndependentBlendEnable=true: check each slot individually
-    for (uint8_t slot = 0; slot < 8; slot++) {
-        const auto& rt = bd.RenderTarget[slot];
-        bool slot_active = rt.BlendEnable || rt.RenderTargetWriteMask != 0;
-        if (!slot_active) continue;
-        bool slot_bound  = slot < nca;
-        bool ps_writes   = (ps_valid_render_targets >> slot) & 1;
-        if (slot_active && slot_bound && !ps_writes) return false;
-        if (slot_active && !slot_bound)              return false;
-    }
+    // // IndependentBlendEnable=true: check each slot individually
+    // for (uint8_t slot = 0; slot < 8; slot++) {
+    //     const auto& rt = bd.RenderTarget[slot];
+    //     bool slot_active = rt.BlendEnable || rt.RenderTargetWriteMask != 0;
+    //     if (!slot_active) continue;
+    //     bool slot_bound  = slot < nca;
+    //     bool ps_writes   = (ps_valid_render_targets >> slot) & 1;
+    //     if (slot_active && slot_bound && !ps_writes) return false;
+    //     if (slot_active && !slot_bound)              return false;
+    // }
     return true;
 }
 
@@ -1002,7 +1002,7 @@ std::vector<Prediction> predictor_ps_rps_blend_history(
                 if (previous_predictions.count(pred) == 0) {
                     predictions.push_back(pred);
                     previous_predictions.insert(pred);
-                    Logger::info(str::format("PREDICTED: ", format_desc(pred.pDesc)));
+                    // Logger::info(str::format("PREDICTED: ", format_desc(pred.pDesc)));
                 }
             }
         }
@@ -1030,8 +1030,8 @@ std::vector<Prediction> predictor_global_rps_blend_compatible(
     uint32_t ps_vrt = ps->ps_outs.count;
 
     for (const auto& [rps, blend_map] : rps_blend_table) {
-        if (!rps_compatible_with_ps(rps, ps))
-            continue;
+        // if (!rps_compatible_with_ps(rps, ps))
+        //     continue;
         for (const auto& [blend, count] : blend_map) {
             if (!blend_compatible_with_ps(blend, rps.num_color_attachments, ps_vrt, blend_min_ps_outs))
                 continue;
@@ -1096,7 +1096,7 @@ std::vector<Prediction> predictor_global_rps_blend_compatible(
                 if (previous_predictions.count(pred) == 0) {
                     predictions.push_back(pred);
                     previous_predictions.insert(pred);
-                    Logger::info(str::format("PREDICTED: ", format_desc(pred.pDesc)));
+                    // Logger::info(str::format("PREDICTED: ", format_desc(pred.pDesc)));
                 }
             }
         }

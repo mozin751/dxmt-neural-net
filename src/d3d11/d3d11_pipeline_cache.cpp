@@ -28,6 +28,7 @@ constexpr uint32_t kCacheMagic   = 0x44584D43;
 constexpr uint32_t kCacheVersion = 1;
 constexpr size_t kDescKeyLen = 17;
 constexpr const char* kDefaultPSName = "________";
+constexpr bool kPredict = false;
 
 class MTLD3D11InputLayout final
     : public MTLD3D11DeviceChild<IMTLD3D11InputLayout> {
@@ -324,26 +325,27 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     vertex_shaders_.emplace(vs_name, managed_shader->sha1());
 
     // Predictions:
-    for (const auto& ps_name: vs_to_ps_map_[vs_name]) {
-      if (ps_name.has_value() && pixel_shaders_.count(ps_name.value()) == 0) continue;
-      ManagedShader ps = ps_name.has_value() ? shaders_[pixel_shaders_[ps_name.value()]].get() : nullptr;
-      auto predictions =  predictor_composed(
-        managed_shader, ps,
-        ps_rps_blend_table_,
-        rps_blend_table_,
-        input_requirement_to_layouts_,
-        layout_by_sha1_,
-        previous_predictions_,
-        blend_min_ps_outs_,
-        /*top_k=*/5);
-      // Logger::info(str::format("Is default blend desc nullptr? ", blend_states.cache[kDefaultBlendDesc].get() == nullptr));
+    if (kPredict) {
+      for (const auto& ps_name: vs_to_ps_map_[vs_name]) {
+        if (ps_name.has_value() && pixel_shaders_.count(ps_name.value()) == 0) continue;
+        ManagedShader ps = ps_name.has_value() ? shaders_[pixel_shaders_[ps_name.value()]].get() : nullptr;
+        auto predictions =  predictor_composed(
+          managed_shader, ps,
+          ps_rps_blend_table_,
+          rps_blend_table_,
+          input_requirement_to_layouts_,
+          layout_by_sha1_,
+          previous_predictions_,
+          blend_min_ps_outs_,
+          /*top_k=*/5);
+        // Logger::info(str::format("Is default blend desc nullptr? ", blend_states.cache[kDefaultBlendDesc].get() == nullptr));
 
-      for (auto prediction: predictions) {
-        MTLCompiledGraphicsPipeline *dummyPipeline;
-        GetGraphicsPipeline(&prediction.pDesc, &dummyPipeline);
+        for (auto prediction: predictions) {
+          MTLCompiledGraphicsPipeline *dummyPipeline;
+          GetGraphicsPipeline(&prediction.pDesc, &dummyPipeline);
+        }
       }
     }
-
 
     *ppShader =
         ref(new TShaderBase<ID3D11VertexShader, MTLD3D10VertexShader>(device, managed_shader));
@@ -370,23 +372,25 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     pixel_shaders_.emplace(ps_name, managed_shader->sha1());
 
     // Predictions
-    for (const auto& vs_name: ps_to_vs_map_[ps_name]) {
-      if (vertex_shaders_.count(vs_name) == 0) continue;
-      ManagedShader vs = shaders_[vertex_shaders_[vs_name]].get();
-      auto predictions =  predictor_composed(
-        vs, managed_shader,
-        ps_rps_blend_table_,
-        rps_blend_table_,
-        input_requirement_to_layouts_,
-        layout_by_sha1_,
-        previous_predictions_,
-        blend_min_ps_outs_,
-        /*top_k=*/5);
-      // Logger::info(str::format("Is default blend desc nullptr? ", blend_states.cache[kDefaultBlendDesc].get() == nullptr));
-      
-      for (auto prediction: predictions) {
-        MTLCompiledGraphicsPipeline *dummyPipeline;
-        GetGraphicsPipeline(&prediction.pDesc, &dummyPipeline);
+    if (kPredict) {
+      for (const auto& vs_name: ps_to_vs_map_[ps_name]) {
+        if (vertex_shaders_.count(vs_name) == 0) continue;
+        ManagedShader vs = shaders_[vertex_shaders_[vs_name]].get();
+        auto predictions =  predictor_composed(
+          vs, managed_shader,
+          ps_rps_blend_table_,
+          rps_blend_table_,
+          input_requirement_to_layouts_,
+          layout_by_sha1_,
+          previous_predictions_,
+          blend_min_ps_outs_,
+          /*top_k=*/5);
+        // Logger::info(str::format("Is default blend desc nullptr? ", blend_states.cache[kDefaultBlendDesc].get() == nullptr));
+        
+        for (auto prediction: predictions) {
+          MTLCompiledGraphicsPipeline *dummyPipeline;
+          GetGraphicsPipeline(&prediction.pDesc, &dummyPipeline);
+        }
       }
     }
 
@@ -473,23 +477,25 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     layout_by_sha1_.emplace(il_sha1, cached);
 
     // Predictions
-    for (const auto vs_name: input_requirement_to_vs_[sig]) {
-      for (const auto& ps_name: vs_to_ps_map_[vs_name]) {
-        if (ps_name.has_value() && pixel_shaders_.count(ps_name.value()) == 0) continue;
-        ManagedShader ps = ps_name.has_value() ? shaders_[pixel_shaders_[ps_name.value()]].get() : nullptr;
-        auto predictions =  predictor_composed(
-          shaders_[vertex_shaders_[vs_name]].get(), ps,
-          ps_rps_blend_table_,
-          rps_blend_table_,
-          input_requirement_to_layouts_,
-          layout_by_sha1_,
-          previous_predictions_,
-          blend_min_ps_outs_,
-          /*top_k=*/5);
+    if (kPredict) {
+      for (const auto vs_name: input_requirement_to_vs_[sig]) {
+        for (const auto& ps_name: vs_to_ps_map_[vs_name]) {
+          if (ps_name.has_value() && pixel_shaders_.count(ps_name.value()) == 0) continue;
+          ManagedShader ps = ps_name.has_value() ? shaders_[pixel_shaders_[ps_name.value()]].get() : nullptr;
+          auto predictions =  predictor_composed(
+            shaders_[vertex_shaders_[vs_name]].get(), ps,
+            ps_rps_blend_table_,
+            rps_blend_table_,
+            input_requirement_to_layouts_,
+            layout_by_sha1_,
+            previous_predictions_,
+            blend_min_ps_outs_,
+            /*top_k=*/5);
 
-        for (auto prediction: predictions) {
-          MTLCompiledGraphicsPipeline *dummyPipeline;
-          GetGraphicsPipeline(&prediction.pDesc, &dummyPipeline);
+          for (auto prediction: predictions) {
+            MTLCompiledGraphicsPipeline *dummyPipeline;
+            GetGraphicsPipeline(&prediction.pDesc, &dummyPipeline);
+          }
         }
       }
     }
@@ -555,6 +561,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 
         if (!pred.hit) {
           const_cast<Prediction&>(*it).hit = true;
+          Logger::info(str::format("Prediction hit on: ", format_desc(pred.pDesc)));
           auto desc = pred.pDesc;
           if (desc.PixelShader) {
             auto key = std::make_pair(RenderPassSignature::from_desc(desc), desc.BlendState);
@@ -683,8 +690,10 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       std::string ps_name = kDefaultPSName;
       if (pDesc->PixelShader) {
         ps_name = pDesc->PixelShader->sha1().string().substr(0, 8);
+        if (ps_to_vs_map_[ps_name].count(vs_name) == 0) Logger::info(str::format("Adding pair: ", vs_name, "/", ps_name));
         ps_to_vs_map_[ps_name].insert(vs_name);
       }
+      if (vs_to_ps_map_[vs_name].count(ps_name) == 0) Logger::info(str::format("Adding pair: ", vs_name, "/", ps_name));
       vs_to_ps_map_[vs_name].insert(pDesc->PixelShader ? std::optional<std::string>(ps_name) : std::nullopt);
       descriptor_shader_map_[str::format(vs_name, "/", ps_name)].insert(*pDesc);
       dirty_maps_ = true;
@@ -1152,6 +1161,163 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     }
   }
 
+  void savePredictorState(const std::string& path) {
+      std::ofstream f(path, std::ios::binary | std::ios::trunc);
+      if (!f) { ERR("Failed to open predictor state for write: ", path); return; }
+
+      constexpr uint32_t kMagic   = 0x50524544; // "PRED"
+      constexpr uint32_t kVersion = 2;
+      write_pod(f, kMagic);
+      write_pod(f, kVersion);
+
+      // --- ps_rps_blend_table_ ---
+      write_pod(f, (uint32_t)ps_rps_blend_table_.size());
+      for (const auto& [ps_sha1, pair_map] : ps_rps_blend_table_) {
+          write_pod(f, ps_sha1);
+          write_pod(f, (uint32_t)pair_map.size());
+          for (const auto& [key, count] : pair_map) {
+              const auto& [rps, bs] = key;
+              // RPS
+              write_pod(f, rps.num_color_attachments);
+              write_pod(f, rps.color_formats);
+              write_pod(f, rps.depth_stencil_format);
+              write_pod(f, rps.sample_count);
+              // Blend state — serialise by content, not pointer
+              bool has_blend = (bs != nullptr);
+              write_pod(f, has_blend);
+              if (has_blend) {
+                  D3D11_BLEND_DESC1 bd;
+                  bs->GetDesc1(&bd);
+                  write_pod(f, bd);
+              }
+              write_pod(f, count);
+          }
+      }
+
+      // --- rps_blend_table_ ---
+      write_pod(f, (uint32_t)rps_blend_table_.size());
+      for (const auto& [rps, blend_map] : rps_blend_table_) {
+          write_pod(f, rps.num_color_attachments);
+          write_pod(f, rps.color_formats);
+          write_pod(f, rps.depth_stencil_format);
+          write_pod(f, rps.sample_count);
+          write_pod(f, (uint32_t)blend_map.size());
+          for (const auto& [bs, count] : blend_map) {
+              bool has_blend = (bs != nullptr);
+              write_pod(f, has_blend);
+              if (has_blend) {
+                  D3D11_BLEND_DESC1 bd;
+                  bs->GetDesc1(&bd);
+                  write_pod(f, bd);
+              }
+              write_pod(f, count);
+          }
+      }
+
+      // --- blend_min_ps_outs_ ---
+      write_pod(f, (uint32_t)blend_min_ps_outs_.size());
+      for (const auto& [bs, min_count] : blend_min_ps_outs_) {
+          bool has_blend = (bs != nullptr);
+          write_pod(f, has_blend);
+          if (has_blend) {
+              D3D11_BLEND_DESC1 bd;
+              bs->GetDesc1(&bd);
+              write_pod(f, bd);
+          }
+          write_pod(f, min_count);
+      }
+  }
+
+  void loadPredictorState(const std::string& path) {
+      std::ifstream f(path, std::ios::binary);
+      if (!f) return; // first run
+
+      constexpr uint32_t kMagic   = 0x50524544;
+      constexpr uint32_t kVersion = 2;
+
+      uint32_t magic = 0, version = 0;
+      if (!read_pod(f, magic)   || magic   != kMagic)   return;
+      if (!read_pod(f, version) || version != kVersion) return;
+
+      // Helper: deserialise a blend state pointer from stored D3D11_BLEND_DESC1
+      auto read_blend = [&](IMTLD3D11BlendState*& bs) -> bool {
+          bool has_blend = false;
+          if (!read_pod(f, has_blend)) return false;
+          bs = nullptr;
+          if (has_blend) {
+              D3D11_BLEND_DESC1 bd;
+              if (!read_pod(f, bd)) return false;
+              if (FAILED(blend_states.CreateStateObject(&bd, &bs))) return false;
+              bs->Release(); // cache owns lifetime
+          }
+          return true;
+      };
+
+      auto read_rps = [&](RenderPassSignature& rps) -> bool {
+          if (!read_pod(f, rps.num_color_attachments)) return false;
+          if (!read_pod(f, rps.color_formats))         return false;
+          if (!read_pod(f, rps.depth_stencil_format))  return false;
+          if (!read_pod(f, rps.sample_count))          return false;
+          return true;
+      };
+
+      // --- ps_rps_blend_table_ ---
+      uint32_t ps_count = 0;
+      if (!read_pod(f, ps_count)) return;
+      for (uint32_t i = 0; i < ps_count; i++) {
+          Sha1Digest ps_sha1;
+          if (!read_pod(f, ps_sha1)) return;
+          uint32_t pair_count = 0;
+          if (!read_pod(f, pair_count)) return;
+          auto& pair_map = ps_rps_blend_table_[ps_sha1];
+          for (uint32_t j = 0; j < pair_count; j++) {
+              RenderPassSignature rps{};
+              if (!read_rps(rps)) return;
+              IMTLD3D11BlendState* bs = nullptr;
+              if (!read_blend(bs)) return;
+              uint32_t count = 0;
+              if (!read_pod(f, count)) return;
+              auto key = std::make_pair(rps, bs);
+              pair_map[key] += count;
+          }
+      }
+
+      // --- rps_blend_table_ ---
+      uint32_t rps_count = 0;
+      if (!read_pod(f, rps_count)) return;
+      for (uint32_t i = 0; i < rps_count; i++) {
+          RenderPassSignature rps{};
+          if (!read_rps(rps)) return;
+          uint32_t blend_count = 0;
+          if (!read_pod(f, blend_count)) return;
+          auto& blend_map = rps_blend_table_[rps];
+          for (uint32_t j = 0; j < blend_count; j++) {
+              IMTLD3D11BlendState* bs = nullptr;
+              if (!read_blend(bs)) return;
+              uint32_t count = 0;
+              if (!read_pod(f, count)) return;
+              blend_map[bs] += count;
+          }
+      }
+
+      // --- blend_min_ps_outs_ ---
+      uint32_t bmp_count = 0;
+      if (!read_pod(f, bmp_count)) return;
+      for (uint32_t i = 0; i < bmp_count; i++) {
+          IMTLD3D11BlendState* bs = nullptr;
+          if (!read_blend(bs)) return;
+          uint8_t min_count = 0;
+          if (!read_pod(f, min_count)) return;
+          if (bs) {
+              auto it = blend_min_ps_outs_.find(bs);
+              if (it == blend_min_ps_outs_.end())
+                  blend_min_ps_outs_[bs] = min_count;
+              else
+                  it->second = std::min(it->second, min_count);
+          }
+      }
+  }
+
   public:
   // void OnRenderPassTransition(const RenderPassSignature& new_rps,
   //                             IMTLD3D11BlendState* blend) override {
@@ -1170,6 +1336,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     readShaderPairMap(vs_to_ps_map_, WMT::GetCacheDir() + "vs_to_ps_map.bin");
     readShaderPairMap(ps_to_vs_map_, WMT::GetCacheDir() + "ps_to_vs_map.bin");
     loadCacheFromDisk(WMT::GetCacheDir() + "shader_descriptor_map.bin");
+    loadPredictorState(WMT::GetCacheDir() + "predictor_state.bin");
   };
 
   ~PipelineCache() {
@@ -1182,6 +1349,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       writeShaderPairMap(ps_to_vs_map_, WMT::GetCacheDir() + "ps_to_vs_map.bin");
     //   writeCacheToDisk(WMT::GetCacheDir() + "shader_descriptor_map.bin");
     }
+    // savePredictorState(WMT::GetCacheDir() + "predictor_state.bin");
 
     Logger::info(str::format("Num predictions: ", previous_predictions_.size()));
     int hits = 0;
