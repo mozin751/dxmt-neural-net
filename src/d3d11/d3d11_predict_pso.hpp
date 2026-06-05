@@ -4,6 +4,7 @@
 #include "sha1/sha1_util.hpp"
 #include "DXBCParser/BlobContainer.h"
 #include "DXBCParser/DXBCUtils.h"
+#include "DXBCParser/ShaderBinary.h"
 #include <unordered_set>
 
 namespace dxmt {
@@ -488,6 +489,309 @@ LayoutCoversVS(InputLayout *il, const VSInputRequirement &req) {
       return false; // VS reads a register the layout doesn't feed
   }
   return true;
+}
+
+// Raw DXBC opcode token — just the type, stripped of length/flags
+using OpcodeSeq = std::vector<uint32_t>;
+
+static const char* opcode_name(uint32_t op) {
+    using namespace microsoft;
+    using T = D3D10_SB_OPCODE_TYPE;
+    switch (static_cast<T>(op)) {
+    case D3D10_SB_OPCODE_ADD:                                   return "ADD";
+    case D3D10_SB_OPCODE_AND:                                   return "AND";
+    case D3D10_SB_OPCODE_BREAK:                                 return "BREAK";
+    case D3D10_SB_OPCODE_BREAKC:                                return "BREAKC";
+    case D3D10_SB_OPCODE_CALL:                                  return "CALL";
+    case D3D10_SB_OPCODE_CALLC:                                 return "CALLC";
+    case D3D10_SB_OPCODE_CASE:                                  return "CASE";
+    case D3D10_SB_OPCODE_CONTINUE:                              return "CONTINUE";
+    case D3D10_SB_OPCODE_CONTINUEC:                             return "CONTINUEC";
+    case D3D10_SB_OPCODE_CUT:                                   return "CUT";
+    case D3D10_SB_OPCODE_DEFAULT:                               return "DEFAULT";
+    case D3D10_SB_OPCODE_DERIV_RTX:                             return "DERIV_RTX";
+    case D3D10_SB_OPCODE_DERIV_RTY:                             return "DERIV_RTY";
+    case D3D10_SB_OPCODE_DISCARD:                               return "DISCARD";
+    case D3D10_SB_OPCODE_DIV:                                   return "DIV";
+    case D3D10_SB_OPCODE_DP2:                                   return "DP2";
+    case D3D10_SB_OPCODE_DP3:                                   return "DP3";
+    case D3D10_SB_OPCODE_DP4:                                   return "DP4";
+    case D3D10_SB_OPCODE_ELSE:                                  return "ELSE";
+    case D3D10_SB_OPCODE_EMIT:                                  return "EMIT";
+    case D3D10_SB_OPCODE_EMITTHENCUT:                           return "EMITTHENCUT";
+    case D3D10_SB_OPCODE_ENDIF:                                 return "ENDIF";
+    case D3D10_SB_OPCODE_ENDLOOP:                               return "ENDLOOP";
+    case D3D10_SB_OPCODE_ENDSWITCH:                             return "ENDSWITCH";
+    case D3D10_SB_OPCODE_EQ:                                    return "EQ";
+    case D3D10_SB_OPCODE_EXP:                                   return "EXP";
+    case D3D10_SB_OPCODE_FRC:                                   return "FRC";
+    case D3D10_SB_OPCODE_FTOI:                                  return "FTOI";
+    case D3D10_SB_OPCODE_FTOU:                                  return "FTOU";
+    case D3D10_SB_OPCODE_GE:                                    return "GE";
+    case D3D10_SB_OPCODE_IADD:                                  return "IADD";
+    case D3D10_SB_OPCODE_IF:                                    return "IF";
+    case D3D10_SB_OPCODE_IEQ:                                   return "IEQ";
+    case D3D10_SB_OPCODE_IGE:                                   return "IGE";
+    case D3D10_SB_OPCODE_ILT:                                   return "ILT";
+    case D3D10_SB_OPCODE_IMAD:                                  return "IMAD";
+    case D3D10_SB_OPCODE_IMAX:                                  return "IMAX";
+    case D3D10_SB_OPCODE_IMIN:                                  return "IMIN";
+    case D3D10_SB_OPCODE_IMUL:                                  return "IMUL";
+    case D3D10_SB_OPCODE_INE:                                   return "INE";
+    case D3D10_SB_OPCODE_INEG:                                  return "INEG";
+    case D3D10_SB_OPCODE_ISHL:                                  return "ISHL";
+    case D3D10_SB_OPCODE_ISHR:                                  return "ISHR";
+    case D3D10_SB_OPCODE_ITOF:                                  return "ITOF";
+    case D3D10_SB_OPCODE_LABEL:                                 return "LABEL";
+    case D3D10_SB_OPCODE_LD:                                    return "LD";
+    case D3D10_SB_OPCODE_LD_MS:                                 return "LD_MS";
+    case D3D10_SB_OPCODE_LOG:                                   return "LOG";
+    case D3D10_SB_OPCODE_LOOP:                                  return "LOOP";
+    case D3D10_SB_OPCODE_LT:                                    return "LT";
+    case D3D10_SB_OPCODE_MAD:                                   return "MAD";
+    case D3D10_SB_OPCODE_MIN:                                   return "MIN";
+    case D3D10_SB_OPCODE_MAX:                                   return "MAX";
+    case D3D10_SB_OPCODE_CUSTOMDATA:                            return "CUSTOMDATA";
+    case D3D10_SB_OPCODE_MOV:                                   return "MOV";
+    case D3D10_SB_OPCODE_MOVC:                                  return "MOVC";
+    case D3D10_SB_OPCODE_MUL:                                   return "MUL";
+    case D3D10_SB_OPCODE_NE:                                    return "NE";
+    case D3D10_SB_OPCODE_NOP:                                   return "NOP";
+    case D3D10_SB_OPCODE_NOT:                                   return "NOT";
+    case D3D10_SB_OPCODE_OR:                                    return "OR";
+    case D3D10_SB_OPCODE_RESINFO:                               return "RESINFO";
+    case D3D10_SB_OPCODE_RET:                                   return "RET";
+    case D3D10_SB_OPCODE_RETC:                                  return "RETC";
+    case D3D10_SB_OPCODE_ROUND_NE:                              return "ROUND_NE";
+    case D3D10_SB_OPCODE_ROUND_NI:                              return "ROUND_NI";
+    case D3D10_SB_OPCODE_ROUND_PI:                              return "ROUND_PI";
+    case D3D10_SB_OPCODE_ROUND_Z:                               return "ROUND_Z";
+    case D3D10_SB_OPCODE_RSQ:                                   return "RSQ";
+    case D3D10_SB_OPCODE_SAMPLE:                                return "SAMPLE";
+    case D3D10_SB_OPCODE_SAMPLE_C:                              return "SAMPLE_C";
+    case D3D10_SB_OPCODE_SAMPLE_C_LZ:                          return "SAMPLE_C_LZ";
+    case D3D10_SB_OPCODE_SAMPLE_L:                              return "SAMPLE_L";
+    case D3D10_SB_OPCODE_SAMPLE_D:                              return "SAMPLE_D";
+    case D3D10_SB_OPCODE_SAMPLE_B:                              return "SAMPLE_B";
+    case D3D10_SB_OPCODE_SQRT:                                  return "SQRT";
+    case D3D10_SB_OPCODE_SWITCH:                                return "SWITCH";
+    case D3D10_SB_OPCODE_SINCOS:                                return "SINCOS";
+    case D3D10_SB_OPCODE_UDIV:                                  return "UDIV";
+    case D3D10_SB_OPCODE_ULT:                                   return "ULT";
+    case D3D10_SB_OPCODE_UGE:                                   return "UGE";
+    case D3D10_SB_OPCODE_UMUL:                                  return "UMUL";
+    case D3D10_SB_OPCODE_UMAD:                                  return "UMAD";
+    case D3D10_SB_OPCODE_UMAX:                                  return "UMAX";
+    case D3D10_SB_OPCODE_UMIN:                                  return "UMIN";
+    case D3D10_SB_OPCODE_USHR:                                  return "USHR";
+    case D3D10_SB_OPCODE_UTOF:                                  return "UTOF";
+    case D3D10_SB_OPCODE_XOR:                                   return "XOR";
+    case D3D10_SB_OPCODE_DCL_RESOURCE:                         return "DCL_RESOURCE";
+    case D3D10_SB_OPCODE_DCL_CONSTANT_BUFFER:                  return "DCL_CONSTANT_BUFFER";
+    case D3D10_SB_OPCODE_DCL_SAMPLER:                          return "DCL_SAMPLER";
+    case D3D10_SB_OPCODE_DCL_INDEX_RANGE:                      return "DCL_INDEX_RANGE";
+    case D3D10_SB_OPCODE_DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY:     return "DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY";
+    case D3D10_SB_OPCODE_DCL_GS_INPUT_PRIMITIVE:               return "DCL_GS_INPUT_PRIMITIVE";
+    case D3D10_SB_OPCODE_DCL_MAX_OUTPUT_VERTEX_COUNT:          return "DCL_MAX_OUTPUT_VERTEX_COUNT";
+    case D3D10_SB_OPCODE_DCL_INPUT:                            return "DCL_INPUT";
+    case D3D10_SB_OPCODE_DCL_INPUT_SGV:                        return "DCL_INPUT_SGV";
+    case D3D10_SB_OPCODE_DCL_INPUT_SIV:                        return "DCL_INPUT_SIV";
+    case D3D10_SB_OPCODE_DCL_INPUT_PS:                         return "DCL_INPUT_PS";
+    case D3D10_SB_OPCODE_DCL_INPUT_PS_SGV:                     return "DCL_INPUT_PS_SGV";
+    case D3D10_SB_OPCODE_DCL_INPUT_PS_SIV:                     return "DCL_INPUT_PS_SIV";
+    case D3D10_SB_OPCODE_DCL_OUTPUT:                           return "DCL_OUTPUT";
+    case D3D10_SB_OPCODE_DCL_OUTPUT_SGV:                       return "DCL_OUTPUT_SGV";
+    case D3D10_SB_OPCODE_DCL_OUTPUT_SIV:                       return "DCL_OUTPUT_SIV";
+    case D3D10_SB_OPCODE_DCL_TEMPS:                            return "DCL_TEMPS";
+    case D3D10_SB_OPCODE_DCL_INDEXABLE_TEMP:                   return "DCL_INDEXABLE_TEMP";
+    case D3D10_SB_OPCODE_DCL_GLOBAL_FLAGS:                     return "DCL_GLOBAL_FLAGS";
+    case D3D11_SB_OPCODE_EMIT_STREAM:                          return "EMIT_STREAM";
+    case D3D11_SB_OPCODE_CUT_STREAM:                           return "CUT_STREAM";
+    case D3D11_SB_OPCODE_EMITTHENCUT_STREAM:                   return "EMITTHENCUT_STREAM";
+    case D3D11_SB_OPCODE_INTERFACE_CALL:                       return "INTERFACE_CALL";
+    case D3D11_SB_OPCODE_BUFINFO:                              return "BUFINFO";
+    case D3D11_SB_OPCODE_DERIV_RTX_COARSE:                     return "DERIV_RTX_COARSE";
+    case D3D11_SB_OPCODE_DERIV_RTX_FINE:                       return "DERIV_RTX_FINE";
+    case D3D11_SB_OPCODE_DERIV_RTY_COARSE:                     return "DERIV_RTY_COARSE";
+    case D3D11_SB_OPCODE_DERIV_RTY_FINE:                       return "DERIV_RTY_FINE";
+    case D3D11_SB_OPCODE_GATHER4_C:                            return "GATHER4_C";
+    case D3D11_SB_OPCODE_GATHER4_PO:                           return "GATHER4_PO";
+    case D3D11_SB_OPCODE_GATHER4_PO_C:                         return "GATHER4_PO_C";
+    case D3D11_SB_OPCODE_RCP:                                  return "RCP";
+    case D3D11_SB_OPCODE_F32TOF16:                             return "F32TOF16";
+    case D3D11_SB_OPCODE_F16TOF32:                             return "F16TOF32";
+    case D3D11_SB_OPCODE_UADDC:                                return "UADDC";
+    case D3D11_SB_OPCODE_USUBB:                                return "USUBB";
+    case D3D11_SB_OPCODE_COUNTBITS:                            return "COUNTBITS";
+    case D3D11_SB_OPCODE_FIRSTBIT_HI:                          return "FIRSTBIT_HI";
+    case D3D11_SB_OPCODE_FIRSTBIT_LO:                          return "FIRSTBIT_LO";
+    case D3D11_SB_OPCODE_FIRSTBIT_SHI:                         return "FIRSTBIT_SHI";
+    case D3D11_SB_OPCODE_UBFE:                                 return "UBFE";
+    case D3D11_SB_OPCODE_IBFE:                                 return "IBFE";
+    case D3D11_SB_OPCODE_BFI:                                  return "BFI";
+    case D3D11_SB_OPCODE_BFREV:                                return "BFREV";
+    case D3D11_SB_OPCODE_SWAPC:                                return "SWAPC";
+    case D3D11_SB_OPCODE_DCL_STREAM:                           return "DCL_STREAM";
+    case D3D11_SB_OPCODE_DCL_FUNCTION_BODY:                    return "DCL_FUNCTION_BODY";
+    case D3D11_SB_OPCODE_DCL_FUNCTION_TABLE:                   return "DCL_FUNCTION_TABLE";
+    case D3D11_SB_OPCODE_DCL_INTERFACE:                        return "DCL_INTERFACE";
+    case D3D11_SB_OPCODE_DCL_INPUT_CONTROL_POINT_COUNT:        return "DCL_INPUT_CONTROL_POINT_COUNT";
+    case D3D11_SB_OPCODE_DCL_OUTPUT_CONTROL_POINT_COUNT:       return "DCL_OUTPUT_CONTROL_POINT_COUNT";
+    case D3D11_SB_OPCODE_DCL_TESS_DOMAIN:                      return "DCL_TESS_DOMAIN";
+    case D3D11_SB_OPCODE_DCL_TESS_PARTITIONING:                return "DCL_TESS_PARTITIONING";
+    case D3D11_SB_OPCODE_DCL_TESS_OUTPUT_PRIMITIVE:            return "DCL_TESS_OUTPUT_PRIMITIVE";
+    case D3D11_SB_OPCODE_DCL_HS_MAX_TESSFACTOR:                return "DCL_HS_MAX_TESSFACTOR";
+    case D3D11_SB_OPCODE_DCL_HS_FORK_PHASE_INSTANCE_COUNT:     return "DCL_HS_FORK_PHASE_INSTANCE_COUNT";
+    case D3D11_SB_OPCODE_DCL_HS_JOIN_PHASE_INSTANCE_COUNT:     return "DCL_HS_JOIN_PHASE_INSTANCE_COUNT";
+    case D3D11_SB_OPCODE_DCL_THREAD_GROUP:                     return "DCL_THREAD_GROUP";
+    case D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_TYPED:      return "DCL_UAV_TYPED";
+    case D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_RAW:        return "DCL_UAV_RAW";
+    case D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_STRUCTURED: return "DCL_UAV_STRUCTURED";
+    case D3D11_SB_OPCODE_DCL_THREAD_GROUP_SHARED_MEMORY_RAW:   return "DCL_TGSM_RAW";
+    case D3D11_SB_OPCODE_DCL_THREAD_GROUP_SHARED_MEMORY_STRUCTURED: return "DCL_TGSM_STRUCTURED";
+    case D3D11_SB_OPCODE_DCL_RESOURCE_RAW:                     return "DCL_RESOURCE_RAW";
+    case D3D11_SB_OPCODE_DCL_RESOURCE_STRUCTURED:              return "DCL_RESOURCE_STRUCTURED";
+    case D3D11_SB_OPCODE_LD_UAV_TYPED:                         return "LD_UAV_TYPED";
+    case D3D11_SB_OPCODE_STORE_UAV_TYPED:                      return "STORE_UAV_TYPED";
+    case D3D11_SB_OPCODE_LD_RAW:                               return "LD_RAW";
+    case D3D11_SB_OPCODE_STORE_RAW:                            return "STORE_RAW";
+    case D3D11_SB_OPCODE_LD_STRUCTURED:                        return "LD_STRUCTURED";
+    case D3D11_SB_OPCODE_STORE_STRUCTURED:                     return "STORE_STRUCTURED";
+    case D3D11_SB_OPCODE_ATOMIC_AND:                           return "ATOMIC_AND";
+    case D3D11_SB_OPCODE_ATOMIC_OR:                            return "ATOMIC_OR";
+    case D3D11_SB_OPCODE_ATOMIC_XOR:                           return "ATOMIC_XOR";
+    case D3D11_SB_OPCODE_ATOMIC_CMP_STORE:                     return "ATOMIC_CMP_STORE";
+    case D3D11_SB_OPCODE_ATOMIC_IADD:                          return "ATOMIC_IADD";
+    case D3D11_SB_OPCODE_ATOMIC_IMAX:                          return "ATOMIC_IMAX";
+    case D3D11_SB_OPCODE_ATOMIC_IMIN:                          return "ATOMIC_IMIN";
+    case D3D11_SB_OPCODE_ATOMIC_UMAX:                          return "ATOMIC_UMAX";
+    case D3D11_SB_OPCODE_ATOMIC_UMIN:                          return "ATOMIC_UMIN";
+    case D3D11_SB_OPCODE_IMM_ATOMIC_ALLOC:                     return "IMM_ATOMIC_ALLOC";
+    case D3D11_SB_OPCODE_IMM_ATOMIC_CONSUME:                   return "IMM_ATOMIC_CONSUME";
+    case D3D11_SB_OPCODE_IMM_ATOMIC_IADD:                      return "IMM_ATOMIC_IADD";
+    case D3D11_SB_OPCODE_IMM_ATOMIC_AND:                       return "IMM_ATOMIC_AND";
+    case D3D11_SB_OPCODE_IMM_ATOMIC_OR:                        return "IMM_ATOMIC_OR";
+    case D3D11_SB_OPCODE_IMM_ATOMIC_XOR:                       return "IMM_ATOMIC_XOR";
+    case D3D11_SB_OPCODE_IMM_ATOMIC_EXCH:                      return "IMM_ATOMIC_EXCH";
+    case D3D11_SB_OPCODE_IMM_ATOMIC_CMP_EXCH:                  return "IMM_ATOMIC_CMP_EXCH";
+    case D3D11_SB_OPCODE_IMM_ATOMIC_IMAX:                      return "IMM_ATOMIC_IMAX";
+    case D3D11_SB_OPCODE_IMM_ATOMIC_IMIN:                      return "IMM_ATOMIC_IMIN";
+    case D3D11_SB_OPCODE_IMM_ATOMIC_UMAX:                      return "IMM_ATOMIC_UMAX";
+    case D3D11_SB_OPCODE_IMM_ATOMIC_UMIN:                      return "IMM_ATOMIC_UMIN";
+    case D3D11_SB_OPCODE_SYNC:                                 return "SYNC";
+    case D3D11_SB_OPCODE_DADD:                                 return "DADD";
+    case D3D11_SB_OPCODE_DMAX:                                 return "DMAX";
+    case D3D11_SB_OPCODE_DMIN:                                 return "DMIN";
+    case D3D11_SB_OPCODE_DMUL:                                 return "DMUL";
+    case D3D11_SB_OPCODE_DEQ:                                  return "DEQ";
+    case D3D11_SB_OPCODE_DGE:                                  return "DGE";
+    case D3D11_SB_OPCODE_DLT:                                  return "DLT";
+    case D3D11_SB_OPCODE_DNE:                                  return "DNE";
+    case D3D11_SB_OPCODE_DMOV:                                 return "DMOV";
+    case D3D11_SB_OPCODE_DMOVC:                                return "DMOVC";
+    case D3D11_SB_OPCODE_DTOF:                                 return "DTOF";
+    case D3D11_SB_OPCODE_FTOD:                                 return "FTOD";
+    case D3D11_SB_OPCODE_EVAL_SNAPPED:                         return "EVAL_SNAPPED";
+    case D3D11_SB_OPCODE_EVAL_SAMPLE_INDEX:                    return "EVAL_SAMPLE_INDEX";
+    case D3D11_SB_OPCODE_EVAL_CENTROID:                        return "EVAL_CENTROID";
+    case D3D11_SB_OPCODE_DCL_GS_INSTANCE_COUNT:                return "DCL_GS_INSTANCE_COUNT";
+    case D3D11_1_SB_OPCODE_DDIV:                               return "DDIV";
+    case D3D11_1_SB_OPCODE_DFMA:                               return "DFMA";
+    case D3D11_1_SB_OPCODE_DRCP:                               return "DRCP";
+    case D3D11_1_SB_OPCODE_MSAD:                               return "MSAD";
+    case D3D11_1_SB_OPCODE_DTOI:                               return "DTOI";
+    case D3D11_1_SB_OPCODE_DTOU:                               return "DTOU";
+    case D3D11_1_SB_OPCODE_ITOD:                               return "ITOD";
+    case D3D11_1_SB_OPCODE_UTOD:                               return "UTOD";
+    default: return "UNKNOWN";
+    }
+}
+
+static OpcodeSeq extract_opcode_sequence(const void* dxbc, size_t size) {
+    OpcodeSeq opcodes;
+
+    microsoft::CDXBCParser container;
+    if (FAILED(container.ReadDXBC(dxbc, size)))
+        return opcodes;
+
+    // GetBlob() strips the DXBCBlobHeader (FourCC + BlobSize), so the pointer
+    // lands directly on the version token — exactly what SetShader() expects.
+    UINT idx = container.FindNextMatchingBlob(microsoft::DXBC_GenericShaderEx, 0);
+    if (idx == DXBC_BLOB_NOT_FOUND)
+        idx = container.FindNextMatchingBlob(microsoft::DXBC_GenericShader, 0);
+    if (idx == DXBC_BLOB_NOT_FOUND)
+        return opcodes;
+
+    const auto* tokens = reinterpret_cast<const CShaderToken*>(container.GetBlob(idx));
+    if (!tokens)
+        return opcodes;
+
+    microsoft::D3D10ShaderBinary::CShaderCodeParser parser(tokens);
+    while (!parser.EndOfShader()) {
+        microsoft::D3D10ShaderBinary::CInstruction inst;
+        parser.ParseInstruction(&inst);
+        opcodes.push_back(static_cast<uint32_t>(inst.OpCode()));
+    }
+
+    constexpr size_t kLogMax = 50;
+    std::string seq;
+    for (size_t i = 0; i < std::min(opcodes.size(), kLogMax); ++i) {
+        if (i) seq += ' ';
+        seq += opcode_name(opcodes[i]);
+    }
+
+    return opcodes;
+}
+
+static constexpr uint32_t kMinHashSize = 128;
+static constexpr uint32_t kShingleK    = 4;
+
+using MinHashSig = std::array<uint32_t, kMinHashSize>;
+
+// FNV-1a mix for combining 4 opcodes into a shingle hash
+static uint32_t shingle_hash(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+    uint32_t h = 2166136261u;
+    h = (h ^ a) * 16777619u;
+    h = (h ^ b) * 16777619u;
+    h = (h ^ c) * 16777619u;
+    h = (h ^ d) * 16777619u;
+    return h;
+}
+
+static MinHashSig compute_minhash(const OpcodeSeq& ops) {
+    MinHashSig sig;
+    sig.fill(UINT32_MAX);
+
+    if (ops.size() < kShingleK) {
+        // Shader too short for 4-grams — use individual opcodes as shingles
+        for (uint32_t op : ops) {
+            for (uint32_t i = 0; i < kMinHashSize; i++) {
+                // Universal hash: (a*x + b) mod p, different (a,b) per band
+                uint32_t h = (1000003u * i + 1234567u) ^ op;
+                h ^= h >> 16; h *= 0x45d9f3b; h ^= h >> 16;
+                if (h < sig[i]) sig[i] = h;
+            }
+        }
+        return sig;
+    }
+
+    for (size_t s = 0; s + kShingleK <= ops.size(); s++) {
+        uint32_t sh = shingle_hash(ops[s], ops[s+1], ops[s+2], ops[s+3]);
+        for (uint32_t i = 0; i < kMinHashSize; i++) {
+            // Per-hash-function permutation of the shingle hash
+            uint32_t h = sh ^ (i * 2654435761u);
+            h ^= h >> 16; h *= 0x45d9f3b; h ^= h >> 16;
+            if (h < sig[i]) sig[i] = h;
+        }
+    }
+    return sig;
+}
+
+static float jaccard_estimate(const MinHashSig& a, const MinHashSig& b) {
+    uint32_t matches = 0;
+    for (uint32_t i = 0; i < kMinHashSize; i++)
+        if (a[i] == b[i]) matches++;
+    return static_cast<float>(matches) / kMinHashSize;
 }
 
 void
@@ -1105,6 +1409,319 @@ std::vector<Prediction> predictor_global_rps_blend_compatible(
     return predictions;
 }
 
+std::vector<Prediction> predictor_nn_rps_blend(
+    ManagedShader vs,
+    ManagedShader ps,
+    const std::unordered_map<Sha1Digest, MinHashSig>& ps_minhash,
+    const std::unordered_map<Sha1Digest,
+        std::unordered_map<std::pair<RenderPassSignature, IMTLD3D11BlendState*>, uint32_t,
+            PairHash<RenderPassSignature, IMTLD3D11BlendState*>>>& ps_rps_blend_table,
+    const std::unordered_map<RenderPassSignature,
+        std::unordered_map<IMTLD3D11BlendState*, uint32_t>>& rps_blend_table,
+    std::unordered_map<Sha1Digest, std::unordered_set<Sha1Digest>>& input_req_to_layouts,
+    std::unordered_map<Sha1Digest, InputLayout*>& layout_by_sha1,
+    std::unordered_set<Prediction>& previous_predictions,
+    const std::unordered_map<IMTLD3D11BlendState*, uint8_t>& blend_min_ps_outs,
+    float sim_threshold = 0.5f)
+{
+    std::vector<Prediction> predictions;
+    if (!ps) return predictions;
+
+    // Step 1 — find nearest neighbour by MinHash similarity
+    auto query_it = ps_minhash.find(ps->sha1());
+    if (query_it == ps_minhash.end())
+        return predictions; // no signature yet for this PS
+
+    const auto& query_sig = query_it->second;
+
+    float best_sim = 0.0f;
+    Sha1Digest best_sha1{};
+
+    for (const auto& [known_sha1, known_sig] : ps_minhash) {
+        if (known_sha1 == ps->sha1()) continue;
+        if (ps_rps_blend_table.count(known_sha1) == 0) continue;
+
+        float sim = jaccard_estimate(query_sig, known_sig);
+        if (sim > best_sim) {
+            best_sim = sim;
+            best_sha1 = known_sha1;
+        }
+    }
+
+    // No useful neighbour found
+    if (best_sim < sim_threshold)
+        return predictions;
+
+    // Step 2 — collect RPS candidates from neighbour's history
+    std::unordered_set<RenderPassSignature> rps_candidates;
+    const auto& neighbour_history = ps_rps_blend_table.at(best_sha1);
+    for (const auto& [key, count] : neighbour_history)
+        rps_candidates.insert(key.first);
+
+    // Step 3 — for each candidate RPS, get all known blends from rps_blend_table
+    // Filter by PS compatibility
+    uint8_t nca     = ps->ps_outs.count;
+    uint32_t ps_vrt = ps->reflection().PSValidRenderTargets;
+
+    std::vector<std::pair<uint32_t, std::pair<RenderPassSignature, IMTLD3D11BlendState*>>> ranked;
+
+    for (const auto& rps : rps_candidates) {
+        if (!rps_compatible_with_ps(rps, ps))
+            continue;
+
+        // Look up all blends seen with this RPS globally
+        auto rps_it = rps_blend_table.find(rps);
+        if (rps_it == rps_blend_table.end()) {
+            // RPS not in global table — use whatever the neighbour had
+            for (const auto& [key, count] : neighbour_history) {
+                if (!(key.first == rps)) continue;
+                if (!blend_compatible_with_ps(key.second, nca, ps_vrt, blend_min_ps_outs))
+                    continue;
+                ranked.push_back({count, key});
+            }
+            continue;
+        }
+
+        for (const auto& [blend, count] : rps_it->second) {
+            if (!blend_compatible_with_ps(blend, nca, ps_vrt, blend_min_ps_outs))
+                continue;
+            ranked.push_back({count, {rps, blend}});
+        }
+    }
+
+    // Sort by frequency descending
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b){ return a.first > b.first; });
+
+    // Step 4 — VS-compatible input layouts
+    std::vector<InputLayout*> valid_ils;
+    auto vs_sig = HashVSInputRequirement(vs->vs_input_req);
+    auto il_it  = input_req_to_layouts.find(vs_sig);
+    if (il_it != input_req_to_layouts.end()) {
+        for (const auto& sha1 : il_it->second) {
+            auto jt = layout_by_sha1.find(sha1);
+            if (jt != layout_by_sha1.end())
+                valid_ils.push_back(jt->second);
+        }
+    }
+    if (valid_ils.empty()) {
+        if (vs->vs_input_req.elements.empty())
+            valid_ils.push_back(nullptr);
+        else
+            return predictions;
+    }
+
+    // Step 5 — emit predictions
+    static constexpr SM50_INDEX_BUFFER_FORAMT kIBFs[] = {
+        SM50_INDEX_BUFFER_FORMAT_NONE,
+        SM50_INDEX_BUFFER_FORMAT_UINT16,
+    };
+
+    for (const auto& [score, pair] : ranked) {
+        const auto& [rps, blend] = pair;
+
+        for (auto* il : valid_ils) {
+            for (auto ibf : kIBFs) {
+                MTL_GRAPHICS_PIPELINE_DESC desc{};
+                desc.VertexShader    = vs;
+                desc.PixelShader     = ps;
+                desc.HullShader      = nullptr;
+                desc.DomainShader    = nullptr;
+                desc.GeometryShader  = nullptr;
+
+                desc.NumColorAttachments = rps.num_color_attachments;
+                for (uint8_t s = 0; s < 8; s++)
+                    desc.ColorAttachmentFormats[s] =
+                        s < rps.num_color_attachments
+                        ? rps.color_formats[s]
+                        : WMTPixelFormatInvalid;
+                desc.DepthStencilFormat  = rps.depth_stencil_format;
+                desc.SampleCount         = rps.sample_count;
+                desc.BlendState          = blend;
+                desc.InputLayout         = il;
+                desc.IndexBufferFormat   = ibf;
+                desc.TopologyClass       = WMTPrimitiveTopologyClassTriangle;
+                desc.SampleMask          = 0xFFFFFFFF;
+
+                lock_shader_deterministic_fields(&desc);
+
+                Prediction pred{desc};
+                if (previous_predictions.count(pred) == 0) {
+                    predictions.push_back(pred);
+                    previous_predictions.insert(pred);
+                }
+            }
+        }
+    }
+
+    return predictions;
+}
+
+std::vector<Prediction> predictor_nn_rps_blend_v2(
+    ManagedShader vs,
+    ManagedShader ps,
+    const std::unordered_map<Sha1Digest, MinHashSig>& ps_minhash,
+    const std::unordered_map<Sha1Digest,
+        std::unordered_map<std::pair<RenderPassSignature, IMTLD3D11BlendState*>, uint32_t,
+            PairHash<RenderPassSignature, IMTLD3D11BlendState*>>>& ps_rps_blend_table,
+    const std::unordered_map<RenderPassSignature,
+        std::unordered_map<IMTLD3D11BlendState*, uint32_t>>& rps_blend_table,
+    std::unordered_map<Sha1Digest, std::unordered_set<Sha1Digest>>& input_req_to_layouts,
+    std::unordered_map<Sha1Digest, InputLayout*>& layout_by_sha1,
+    std::unordered_set<Prediction>& previous_predictions,
+    const std::unordered_map<IMTLD3D11BlendState*, uint8_t>& blend_min_ps_outs,
+    bool* found_similar,
+    float sim_threshold = 0.5f,
+    uint32_t extra_blends_per_rps = 2)
+{
+    std::vector<Prediction> predictions;
+    if (!ps) return predictions;
+
+    // Step 1 — find nearest neighbour
+    auto query_it = ps_minhash.find(ps->sha1());
+    if (query_it == ps_minhash.end())
+        return predictions;
+
+    const auto& query_sig = query_it->second;
+
+    float best_sim = 0.0f;
+    Sha1Digest best_sha1{};
+
+    for (const auto& [known_sha1, known_sig] : ps_minhash) {
+        if (known_sha1 == ps->sha1()) continue;
+        if (ps_rps_blend_table.count(known_sha1) == 0) continue;
+        float sim = jaccard_estimate(query_sig, known_sig);
+        if (sim > best_sim) {
+            best_sim = sim;
+            best_sha1 = known_sha1;
+        }
+    }
+
+    *found_similar = best_sim >= sim_threshold;
+    if (!(*found_similar))
+      return predictions;
+
+    uint8_t  nca    = ps->ps_outs.count;
+    uint32_t ps_vrt = ps->reflection().PSValidRenderTargets;
+
+    // Step 2 — use neighbour's history directly as the base candidate set
+    const auto& neighbour_history = ps_rps_blend_table.at(best_sha1);
+
+    // Collect (RPS, blend) pairs from neighbour history, ranked by count
+    std::vector<std::pair<uint32_t, std::pair<RenderPassSignature, IMTLD3D11BlendState*>>> ranked;
+
+    for (const auto& [key, count] : neighbour_history) {
+        const auto& [rps, blend] = key;
+        if (!rps_compatible_with_ps(rps, ps))   continue;
+        if (!blend_compatible_with_ps(blend, nca, ps_vrt, blend_min_ps_outs)) continue;
+        ranked.push_back({count, key});
+    }
+
+    // Step 3 — for each RPS in neighbour history, supplement with top
+    // extra_blends_per_rps additional blends from rps_blend_table,
+    // ranked by global frequency, that aren't already in the list
+    std::unordered_set<RenderPassSignature> seen_rps;
+    for (const auto& [cnt, key] : ranked)
+        seen_rps.insert(key.first);
+
+    for (const auto& rps : seen_rps) {
+        auto rps_it = rps_blend_table.find(rps);
+        if (rps_it == rps_blend_table.end()) continue;
+
+        // Rank blends for this RPS by global frequency
+        std::vector<std::pair<uint32_t, IMTLD3D11BlendState*>> blends_ranked;
+        for (const auto& [blend, count] : rps_it->second)
+            blends_ranked.push_back({count, blend});
+        std::sort(blends_ranked.begin(), blends_ranked.end(),
+                  [](const auto& a, const auto& b){ return a.first > b.first; });
+
+        // Add top extra_blends_per_rps that aren't already covered
+        uint32_t added = 0;
+        for (const auto& [count, blend] : blends_ranked) {
+            if (added >= extra_blends_per_rps) break;
+            if (!blend_compatible_with_ps(blend, nca, ps_vrt, blend_min_ps_outs)) continue;
+
+            // Check if this (rps, blend) pair is already in ranked
+            auto key = std::make_pair(rps, blend);
+            bool already_present = false;
+            for (const auto& [cnt, existing_key] : ranked) {
+                if (existing_key == key) { already_present = true; break; }
+            }
+            if (already_present) continue;
+
+            ranked.push_back({count, key});
+            added++;
+        }
+    }
+
+    // Sort final list by count descending
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b){ return a.first > b.first; });
+
+    // Step 4 — VS-compatible input layouts
+    std::vector<InputLayout*> valid_ils;
+    auto vs_sig = HashVSInputRequirement(vs->vs_input_req);
+    auto il_it  = input_req_to_layouts.find(vs_sig);
+    if (il_it != input_req_to_layouts.end()) {
+        for (const auto& sha1 : il_it->second) {
+            auto jt = layout_by_sha1.find(sha1);
+            if (jt != layout_by_sha1.end())
+                valid_ils.push_back(jt->second);
+        }
+    }
+    if (valid_ils.empty()) {
+        if (vs->vs_input_req.elements.empty())
+            valid_ils.push_back(nullptr);
+        else
+            return predictions;
+    }
+
+    // Step 5 — emit predictions
+    static constexpr SM50_INDEX_BUFFER_FORAMT kIBFs[] = {
+        SM50_INDEX_BUFFER_FORMAT_NONE,
+        SM50_INDEX_BUFFER_FORMAT_UINT16,
+    };
+
+    for (const auto& [score, pair] : ranked) {
+        const auto& [rps, blend] = pair;
+
+        for (auto* il : valid_ils) {
+            for (auto ibf : kIBFs) {
+                MTL_GRAPHICS_PIPELINE_DESC desc{};
+                desc.VertexShader    = vs;
+                desc.PixelShader     = ps;
+                desc.HullShader      = nullptr;
+                desc.DomainShader    = nullptr;
+                desc.GeometryShader  = nullptr;
+
+                desc.NumColorAttachments = rps.num_color_attachments;
+                for (uint8_t s = 0; s < 8; s++)
+                    desc.ColorAttachmentFormats[s] =
+                        s < rps.num_color_attachments
+                        ? rps.color_formats[s]
+                        : WMTPixelFormatInvalid;
+                desc.DepthStencilFormat  = rps.depth_stencil_format;
+                desc.SampleCount         = rps.sample_count;
+                desc.BlendState          = blend;
+                desc.InputLayout         = il;
+                desc.IndexBufferFormat   = ibf;
+                desc.TopologyClass       = WMTPrimitiveTopologyClassTriangle;
+                desc.SampleMask          = 0xFFFFFFFF;
+
+                lock_shader_deterministic_fields(&desc);
+
+                Prediction pred{desc};
+                if (previous_predictions.count(pred) == 0) {
+                    predictions.push_back(pred);
+                    previous_predictions.insert(pred);
+                }
+            }
+        }
+    }
+
+    return predictions;
+}
+
 std::vector<Prediction> predictor_composed(
     ManagedShader vs,
     ManagedShader ps,
@@ -1138,6 +1755,97 @@ std::vector<Prediction> predictor_composed(
             blend_min_ps_outs,
             top_k);
     }
+}
+
+std::vector<Prediction> predictor_composed_nearest_neighbour(
+    ManagedShader vs,
+    ManagedShader ps,
+    const std::unordered_map<Sha1Digest,
+        std::unordered_map<std::pair<RenderPassSignature, IMTLD3D11BlendState*>, uint32_t,
+            PairHash<RenderPassSignature, IMTLD3D11BlendState*>>>& ps_rps_blend_table,
+    const std::unordered_map<RenderPassSignature,
+        std::unordered_map<IMTLD3D11BlendState*, uint32_t>>& rps_blend_table,
+    const std::unordered_map<Sha1Digest, MinHashSig>& ps_minhash,
+    std::unordered_map<Sha1Digest, std::unordered_set<Sha1Digest>>& input_req_to_layouts,
+    std::unordered_map<Sha1Digest, InputLayout*>& layout_by_sha1,
+    std::unordered_set<Prediction>& previous_predictions,
+    const std::unordered_map<IMTLD3D11BlendState*, uint8_t>& blend_min_ps_outs,
+    uint32_t top_k = 3)
+{
+    if (!ps) return {};
+
+    bool ps_known = ps_rps_blend_table.count(ps->sha1()) > 0;
+
+    if (ps_known) {
+        return predictor_ps_rps_blend_history(
+            vs, ps,
+            ps_rps_blend_table,
+            input_req_to_layouts, layout_by_sha1,
+            previous_predictions, top_k);
+    } else {
+        bool dummy;
+        return predictor_nn_rps_blend_v2(
+            vs, ps,
+            ps_minhash,
+            ps_rps_blend_table,
+            rps_blend_table,
+            input_req_to_layouts, layout_by_sha1,
+            previous_predictions,
+            blend_min_ps_outs,
+            &dummy);
+    }
+}
+
+std::vector<Prediction> predictor_composed_nn_and_global(
+    ManagedShader vs,
+    ManagedShader ps,
+    const std::unordered_map<Sha1Digest,
+        std::unordered_map<std::pair<RenderPassSignature, IMTLD3D11BlendState*>, uint32_t,
+            PairHash<RenderPassSignature, IMTLD3D11BlendState*>>>& ps_rps_blend_table,
+    const std::unordered_map<RenderPassSignature,
+        std::unordered_map<IMTLD3D11BlendState*, uint32_t>>& rps_blend_table,
+    const std::unordered_map<Sha1Digest, MinHashSig>& ps_minhash,
+    std::unordered_map<Sha1Digest, std::unordered_set<Sha1Digest>>& input_req_to_layouts,
+    std::unordered_map<Sha1Digest, InputLayout*>& layout_by_sha1,
+    std::unordered_set<Prediction>& previous_predictions,
+    const std::unordered_map<IMTLD3D11BlendState*, uint8_t>& blend_min_ps_outs,
+    uint32_t top_k = 3)
+{
+  if (!ps) return {};
+
+  bool ps_known = ps_rps_blend_table.count(ps->sha1()) > 0;
+
+  if (ps_known) {
+    return predictor_ps_rps_blend_history(
+      vs, ps,
+      ps_rps_blend_table,
+      input_req_to_layouts, layout_by_sha1,
+      previous_predictions, top_k);
+  } else {
+    bool found_similar;
+    auto preds = predictor_nn_rps_blend_v2(
+      vs, ps,
+      ps_minhash,
+      ps_rps_blend_table,
+      rps_blend_table,
+      input_req_to_layouts, layout_by_sha1,
+      previous_predictions,
+      blend_min_ps_outs,
+      &found_similar);
+
+    if (!found_similar) {
+      preds = predictor_global_rps_blend_compatible(
+        vs, ps,
+        rps_blend_table,
+        input_req_to_layouts, layout_by_sha1,
+        previous_predictions,
+        blend_min_ps_outs,
+        top_k);
+    }
+
+    return preds;
+        
+  }
 }
 
 } // namespace dxmt
