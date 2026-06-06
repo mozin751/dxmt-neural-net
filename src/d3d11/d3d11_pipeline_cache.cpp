@@ -22,6 +22,9 @@
 
 namespace dxmt {
 
+class PipelineCache;
+static PipelineCache* g_pipeline_cache_instance = nullptr;
+
 static std::string format_ps_color_outputs(const PSColorOutputs& outs) {
   std::string s = "PSColorOutputs { count=" + std::to_string((uint32_t)outs.count);
   s += " classes=[";
@@ -1491,9 +1494,10 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     readShaderPairMap(ps_to_vs_map_, WMT::GetCacheDir() + "ps_to_vs_map.bin");
     loadCacheFromDisk(WMT::GetCacheDir() + "shader_descriptor_map.bin");
     loadPredictorState(WMT::GetCacheDir() + "predictor_state.bin");
+    g_pipeline_cache_instance = this;
   };
 
-  ~PipelineCache() {
+  void Flush() {
     // if (original_pso_cache_size_ != pso_cache_.size()) {
     //   save_cache(pso_cache_, WMT::GetCacheDir() + "cache_map.bin");
     // }
@@ -1557,6 +1561,19 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   //           return total;
   //       }()
   //   ));
+  }
+
+  ~PipelineCache() {
+    Flush();
+    g_pipeline_cache_instance = nullptr;
+  }
+
+  __attribute__((destructor))
+  static void OnDylibUnload() {
+      if (g_pipeline_cache_instance) {
+          g_pipeline_cache_instance->Flush();
+          g_pipeline_cache_instance = nullptr;
+      }
   }
 };
 
