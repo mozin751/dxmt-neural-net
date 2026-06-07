@@ -22,6 +22,7 @@
 #include "wsi_window.hpp"
 #include "dxmt_info.hpp"
 #include "dxmt_presenter.hpp"
+#include "d3d11_stutter_detector.hpp"
 #include <atomic>
 #include <cfloat>
 #include <format>
@@ -731,6 +732,12 @@ public:
   STDMETHODCALLTYPE
   Present1(UINT SyncInterval, UINT PresentFlags,
            const DXGI_PRESENT_PARAMETERS *pPresentParameters) final {
+    auto now = std::chrono::steady_clock::now();
+    double frame_ms =
+        std::chrono::duration<double, std::milli>(now - last_present_).count();
+    last_present_ = now;
+    stutter_detector_.submit(frame_ms);   // return value no longer used here
+
     if (SyncInterval > 4)
       return DXGI_ERROR_INVALID_CALL;
 
@@ -896,6 +903,17 @@ public:
         std::min(frame.pipeline_cache_hits, 999u),
         std::min(window_misses, 999u)
     ));
+
+    auto stalls = dxmt::g_compile_stall_stats;
+    hud.printLine(str::format(
+        "Stalls ",
+        stalls.num_stalls
+    ));
+    // hud.printLine(std::format(
+    //     "Avg stall time {:2}=",
+    //     (int)(stalls.total_time_stalled/stalls.num_stalls)
+    // ));
+
     hud.end();
   }
 
@@ -1063,6 +1081,9 @@ private:
   std::conditional<EnableMetalFX, WMT::Reference<WMT::FXSpatialScaler>, std::monostate>::type metalfx_scaler;
   std::conditional<EnableMetalFX, Com<D3D11ResourceCommon>, std::monostate>::type upscaled_backbuffer_;
   float scale_factor = 1.0;
+
+  dxmt::StutterDetector           stutter_detector_;
+  std::chrono::steady_clock::time_point last_present_ = std::chrono::steady_clock::now();
 };
 
 HRESULT

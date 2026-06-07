@@ -591,7 +591,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 
         if (!pred.hit) {
           const_cast<Prediction&>(*it).hit = true;
-          Logger::info(str::format("Prediction hit on: ", format_desc(pred.pDesc)));
+          // Logger::info(str::format("Prediction hit on: ", format_desc(pred.pDesc)));
           auto desc = pred.pDesc;
           if (desc.PixelShader) {
             auto key = std::make_pair(RenderPassSignature::from_desc(desc), desc.BlendState);
@@ -676,139 +676,139 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 
     if (previous_predictions_.count(Prediction{*pDesc}) == 0) {
       if (pDesc->PixelShader) {
-        if (pDesc->PixelShader) {
-          auto ps_sha1 = pDesc->PixelShader->sha1();
-          auto rps = RenderPassSignature::from_desc(*pDesc);
-          IMTLD3D11BlendState* blend = pDesc->BlendState;
+        // if (pDesc->PixelShader) {
+        //   auto ps_sha1 = pDesc->PixelShader->sha1();
+        //   auto rps = RenderPassSignature::from_desc(*pDesc);
+        //   IMTLD3D11BlendState* blend = pDesc->BlendState;
 
-          bool ps_known    = ps_rps_blend_table_.count(ps_sha1) > 0;
-          bool rps_seen    = rps_freq_table_.count(rps) > 0;
-          bool blend_seen  = blend_freq_table_.count(blend) > 0;
-          bool pair_seen   = ps_known &&
-                            ps_rps_blend_table_.at(ps_sha1).count(
-                                std::make_pair(rps, blend)) > 0;
+        //   bool ps_known    = ps_rps_blend_table_.count(ps_sha1) > 0;
+        //   bool rps_seen    = rps_freq_table_.count(rps) > 0;
+        //   bool blend_seen  = blend_freq_table_.count(blend) > 0;
+        //   bool pair_seen   = ps_known &&
+        //                     ps_rps_blend_table_.at(ps_sha1).count(
+        //                         std::make_pair(rps, blend)) > 0;
 
-          std::string scenario;
-          if (pair_seen) {
-              scenario = "A_pair";
-          } else if (ps_known && rps_seen && blend_seen) {
-              scenario = "A_unpaired";
-          } else if (!ps_known && rps_seen && blend_seen) {
-              scenario = "B_both";
-          } else if (!ps_known && rps_seen && !blend_seen) {
-              scenario = "B_rps";
-          } else if (!ps_known && !rps_seen && blend_seen) {
-              scenario = "B_blend";
-          } else {
-              scenario = "C";
-          }
+        //   std::string scenario;
+        //   if (pair_seen) {
+        //       scenario = "A_pair";
+        //   } else if (ps_known && rps_seen && blend_seen) {
+        //       scenario = "A_unpaired";
+        //   } else if (!ps_known && rps_seen && blend_seen) {
+        //       scenario = "B_both";
+        //   } else if (!ps_known && rps_seen && !blend_seen) {
+        //       scenario = "B_rps";
+        //   } else if (!ps_known && !rps_seen && blend_seen) {
+        //       scenario = "B_blend";
+        //   } else {
+        //       scenario = "C";
+        //   }
 
-          Logger::info(str::format(
-              "MISS scenario=", scenario,
-              " ps_known=", (uint32_t)ps_known,
-              " rps_seen=", (uint32_t)rps_seen,
-              " blend_seen=", (uint32_t)blend_seen,
-              " pair_seen=", (uint32_t)pair_seen,
-              " PS=", ps_sha1.string().substr(0, 8)
-          ));
+        //   Logger::info(str::format(
+        //       "MISS scenario=", scenario,
+        //       " ps_known=", (uint32_t)ps_known,
+        //       " rps_seen=", (uint32_t)rps_seen,
+        //       " blend_seen=", (uint32_t)blend_seen,
+        //       " pair_seen=", (uint32_t)pair_seen,
+        //       " PS=", ps_sha1.string().substr(0, 8)
+        //   ));
 
-          if (scenario == "B_both" || scenario == "B_rps" || scenario == "B_blend" || scenario == "C") {
-              auto ps_sha1 = pDesc->PixelShader->sha1();
+        //   if (scenario == "B_both" || scenario == "B_rps" || scenario == "B_blend" || scenario == "C") {
+        //       auto ps_sha1 = pDesc->PixelShader->sha1();
               
-              auto query_it = ps_minhash_.find(ps_sha1);
-              if (query_it != ps_minhash_.end()) {
-                  const auto& query_sig = query_it->second;
+        //       auto query_it = ps_minhash_.find(ps_sha1);
+        //       if (query_it != ps_minhash_.end()) {
+        //           const auto& query_sig = query_it->second;
                   
-                  float best_sim = 0.0f;
-                  Sha1Digest best_sha1{};
-                  bool best_has_history = false;
+        //           float best_sim = 0.0f;
+        //           Sha1Digest best_sha1{};
+        //           bool best_has_history = false;
                   
-                  for (const auto& [known_sha1, known_sig] : ps_minhash_) {
-                      if (known_sha1 == ps_sha1) continue;
+        //           for (const auto& [known_sha1, known_sig] : ps_minhash_) {
+        //               if (known_sha1 == ps_sha1) continue;
                       
-                      float sim = jaccard_estimate(query_sig, known_sig);
-                      bool has_history = ps_rps_blend_table_.count(known_sha1) > 0;
+        //               float sim = jaccard_estimate(query_sig, known_sig);
+        //               bool has_history = ps_rps_blend_table_.count(known_sha1) > 0;
                       
-                      if (sim > best_sim && has_history) {
-                          best_sim = sim;
-                          best_sha1 = known_sha1;
-                          best_has_history = true;
-                      }
-                  }
+        //               if (sim > best_sim && has_history) {
+        //                   best_sim = sim;
+        //                   best_sha1 = known_sha1;
+        //                   best_has_history = true;
+        //               }
+        //           }
                   
-                  Logger::info(str::format(
-                      "NN search PS=", ps_sha1.string().substr(0, 8),
-                      " scenario=", scenario,
-                      " best_neighbour=", best_sha1.string().substr(0, 8),
-                      " similarity=", (uint32_t)(best_sim * 100),
-                      "% has_history=", (uint32_t)best_has_history
-                  ));
+        //           Logger::info(str::format(
+        //               "NN search PS=", ps_sha1.string().substr(0, 8),
+        //               " scenario=", scenario,
+        //               " best_neighbour=", best_sha1.string().substr(0, 8),
+        //               " similarity=", (uint32_t)(best_sim * 100),
+        //               "% has_history=", (uint32_t)best_has_history
+        //           ));
 
-                  if (best_has_history && best_sim > 0.0f) {
-                      auto& neighbour_history = ps_rps_blend_table_.at(best_sha1);
+        //           if (best_has_history && best_sim > 0.0f) {
+        //               auto& neighbour_history = ps_rps_blend_table_.at(best_sha1);
                       
-                      auto actual_rps = RenderPassSignature::from_desc(*pDesc);
-                      IMTLD3D11BlendState* actual_blend = pDesc->BlendState;
+        //               auto actual_rps = RenderPassSignature::from_desc(*pDesc);
+        //               IMTLD3D11BlendState* actual_blend = pDesc->BlendState;
                       
-                      // Check if actual pair is in neighbour history
-                      auto key = std::make_pair(actual_rps, actual_blend);
-                      bool neighbour_has_pair = neighbour_history.count(key) > 0;
+        //               // Check if actual pair is in neighbour history
+        //               auto key = std::make_pair(actual_rps, actual_blend);
+        //               bool neighbour_has_pair = neighbour_history.count(key) > 0;
 
-                      // Check: if we emitted ALL pairs from neighbour that share the actual RPS,
-                      // would we have hit?
-                      bool same_rps_covers_actual = false;
-                      uint32_t same_rps_pair_count = 0;
-                      for (const auto& [k, count] : neighbour_history) {
-                          if (k.first == actual_rps) {
-                              same_rps_pair_count++;
-                              if (k.second == actual_blend)
-                                  same_rps_covers_actual = true;
-                          }
-                      }
+        //               // Check: if we emitted ALL pairs from neighbour that share the actual RPS,
+        //               // would we have hit?
+        //               bool same_rps_covers_actual = false;
+        //               uint32_t same_rps_pair_count = 0;
+        //               for (const auto& [k, count] : neighbour_history) {
+        //                   if (k.first == actual_rps) {
+        //                       same_rps_pair_count++;
+        //                       if (k.second == actual_blend)
+        //                           same_rps_covers_actual = true;
+        //                   }
+        //               }
 
-                      // Check: if we emitted ALL pairs from neighbour history entirely,
-                      // would we have hit?
-                      bool full_history_covers_actual = neighbour_has_pair;
+        //               // Check: if we emitted ALL pairs from neighbour history entirely,
+        //               // would we have hit?
+        //               bool full_history_covers_actual = neighbour_has_pair;
 
-                      // Log top-3 pairs from neighbour history
-                      std::vector<std::pair<uint32_t, std::pair<RenderPassSignature, IMTLD3D11BlendState*>>> ranked;
-                      for (const auto& [k, count] : neighbour_history)
-                          ranked.push_back({count, k});
-                      std::sort(ranked.begin(), ranked.end(),
-                                [](const auto& a, const auto& b){ return a.first > b.first; });
+        //               // Log top-3 pairs from neighbour history
+        //               std::vector<std::pair<uint32_t, std::pair<RenderPassSignature, IMTLD3D11BlendState*>>> ranked;
+        //               for (const auto& [k, count] : neighbour_history)
+        //                   ranked.push_back({count, k});
+        //               std::sort(ranked.begin(), ranked.end(),
+        //                         [](const auto& a, const auto& b){ return a.first > b.first; });
 
-                      std::string hist_str;
-                      for (uint32_t i = 0; i < std::min((uint32_t)ranked.size(), 3u); i++) {
-                          const auto& [rps, bs] = ranked[i].second;
-                          hist_str += str::format(
-                              " [", rps.to_string(),
-                              " BLEND=", reinterpret_cast<uintptr_t>(bs),
-                              " cnt=", ranked[i].first, "]"
-                          );
-                      }
+        //               std::string hist_str;
+        //               for (uint32_t i = 0; i < std::min((uint32_t)ranked.size(), 3u); i++) {
+        //                   const auto& [rps, bs] = ranked[i].second;
+        //                   hist_str += str::format(
+        //                       " [", rps.to_string(),
+        //                       " BLEND=", reinterpret_cast<uintptr_t>(bs),
+        //                       " cnt=", ranked[i].first, "]"
+        //                   );
+        //               }
 
-                      Logger::info(str::format(
-                          "NN detail: PS=", ps_sha1.string().substr(0, 8),
-                          " neighbour=", best_sha1.string().substr(0, 8),
-                          " sim=", (uint32_t)(best_sim * 100), "%",
-                          " has_pair=", (uint32_t)neighbour_has_pair,
-                          " same_rps_count=", same_rps_pair_count,
-                          " same_rps_covers=", (uint32_t)same_rps_covers_actual,
-                          " full_history_covers=", (uint32_t)full_history_covers_actual,
-                          " actual_rps=", actual_rps.to_string(),
-                          " actual_blend=", reinterpret_cast<uintptr_t>(actual_blend),
-                          " neighbour_top3:", hist_str
-                      ));
-                  }
-              }
-          }
-        }
+        //               Logger::info(str::format(
+        //                   "NN detail: PS=", ps_sha1.string().substr(0, 8),
+        //                   " neighbour=", best_sha1.string().substr(0, 8),
+        //                   " sim=", (uint32_t)(best_sim * 100), "%",
+        //                   " has_pair=", (uint32_t)neighbour_has_pair,
+        //                   " same_rps_count=", same_rps_pair_count,
+        //                   " same_rps_covers=", (uint32_t)same_rps_covers_actual,
+        //                   " full_history_covers=", (uint32_t)full_history_covers_actual,
+        //                   " actual_rps=", actual_rps.to_string(),
+        //                   " actual_blend=", reinterpret_cast<uintptr_t>(actual_blend),
+        //                   " neighbour_top3:", hist_str
+        //               ));
+        //           }
+        //       }
+        //   }
+        // }
         auto key = std::make_pair(RenderPassSignature::from_desc(*pDesc), pDesc->BlendState);
         ps_rps_blend_table_[pDesc->PixelShader->sha1()][key]++;
       }
 
       if (previous_predictions_.count(Prediction{*pDesc}) == 0) {
-        Logger::info(str::format("REAL DRAW (no prediction match): ", format_desc(*pDesc)));
+        // Logger::info(str::format("REAL DRAW (no prediction match): ", format_desc(*pDesc)));
         ++misses_;
         missed_predictions_.insert(*pDesc);
       }
@@ -850,7 +850,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
         if (ps_to_vs_map_[ps_name].count(vs_name) == 0) Logger::info(str::format("Adding pair: ", vs_name, "/", ps_name));
         ps_to_vs_map_[ps_name].insert(vs_name);
       }
-      if (vs_to_ps_map_[vs_name].count(ps_name) == 0) Logger::info(str::format("Adding pair: ", vs_name, "/", ps_name));
+      if (vs_to_ps_map_[vs_name].count(ps_name == kDefaultPSName ? std::nullopt : std::optional<std::string>(ps_name)) == 0) Logger::info(str::format("Adding pair: ", vs_name, "/", ps_name));
       vs_to_ps_map_[vs_name].insert(pDesc->PixelShader ? std::optional<std::string>(ps_name) : std::nullopt);
       descriptor_shader_map_[str::format(vs_name, "/", ps_name)].insert(*pDesc);
       dirty_maps_ = true;

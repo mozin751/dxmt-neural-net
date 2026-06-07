@@ -5,6 +5,8 @@
 #include "d3d11_shader.hpp"
 #include "log/log.hpp"
 #include "thread.hpp"
+#include "d3d11_stutter_detector.hpp"
+
 
 namespace dxmt {
 
@@ -63,7 +65,15 @@ public:
   }
 
   void GetPipeline(MTL_COMPILED_TESSELLATION_MESH_PIPELINE *pPipeline) final {
+    auto t0 = std::chrono::steady_clock::now();
     ready_.wait(false, std::memory_order_acquire);
+    auto us = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - t0).count();
+    if (us >= 8) {
+      g_compile_stall_stats.num_stalls++;
+      g_compile_stall_stats.total_time_stalled += us;
+      Logger::info(str::format("Time taken to load (Tesselation): ", us));
+    }
     *pPipeline = {state_rasterization_, hull_reflection.NumOutputElement,
                   hull_reflection.ThreadsPerPatch};
   }
@@ -115,8 +125,16 @@ public:
 
     if (PixelShader) {
       info.fragment_function = ps.Function;
+      info.rasterization_enabled = RasterizationEnabled;
+    } else {
+      // Metal's mesh render pipeline forbids a nil fragment function while
+      // rasterization is enabled (unlike the classic render pipeline, which
+      // permits nil-fragment depth-only passes). A depth-only tessellated draw
+      // (PS=null, RASTER=1) has no fragment to bind, so disable rasterization
+      // to keep the descriptor valid.
+      // WORKAROUND ONLY: depth is NOT written for these draws.
+      info.rasterization_enabled = false;
     }
-    info.rasterization_enabled = RasterizationEnabled;
 
     for (unsigned i = 0; i < num_rtvs; i++) {
       if (rtv_formats[i] == WMTPixelFormatInvalid)
