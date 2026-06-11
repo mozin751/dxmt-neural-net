@@ -594,6 +594,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       *ppPipeline = iter->second.get();
 
       auto it = previous_predictions_.find(Prediction{*pDesc});
+      // Prediction hit for the first time
       if (it != previous_predictions_.end() && missed_predictions_.count(*pDesc) == 0) {
         auto pred = const_cast<Prediction&>(*it);
 
@@ -610,11 +611,10 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
           rps_freq_table_[rps]++;
 
           // Blend frequency — pointer is stable (deduped by StateObjectCache)
-          if (desc.BlendState)
-              blend_freq_table_[desc.BlendState]++;
-
-          if (desc.BlendState)
-              rps_blend_table_[rps][desc.BlendState]++;
+          if (desc.BlendState) {
+            blend_freq_table_[desc.BlendState]++;
+            rps_blend_table_[rps][desc.BlendState]++;
+          }
 
           // Existing full-descriptor frequency table
           MTL_GRAPHICS_PIPELINE_DESC anon = desc;
@@ -632,22 +632,21 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     }
     if (pWasCached) *pWasCached = fromCache;
 
-
-    // Updating frequency tables
+    // Prediction miss, and not precopiled (complete miss)
     if (previous_predictions_.count(Prediction{*pDesc}) == 0 && !fromCache) {
       if (pDesc->PixelShader) {
         auto key = std::make_pair(RenderPassSignature::from_desc(*pDesc), pDesc->BlendState);
         ps_rps_blend_table_[pDesc->PixelShader->sha1()][key]++;
       }
 
+      auto rps = RenderPassSignature::from_desc(*pDesc);
+      rps_freq_table_[rps]++;
+
       if (previous_predictions_.count(Prediction{*pDesc}) == 0) {
         // Logger::info(str::format("REAL DRAW (no prediction match): ", format_desc(*pDesc)));
         ++misses_;
         missed_predictions_.insert(*pDesc);
       }
-
-      auto rps = RenderPassSignature::from_desc(*pDesc);
-      rps_freq_table_[rps]++;
 
       // Blend frequency — pointer is stable (deduped by StateObjectCache)
       if (pDesc->BlendState) {
@@ -675,6 +674,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
           caf_freq_table_[i][pDesc->ColorAttachmentFormats[i]]++; 
     }
 
+    // Add vs/ps pairs
     if (!fromCache) {
       auto vs_name = pDesc->VertexShader->sha1().string().substr(0, 8);
       std::string ps_name = kDefaultPSName;
