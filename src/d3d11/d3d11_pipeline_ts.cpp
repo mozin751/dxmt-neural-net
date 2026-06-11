@@ -70,7 +70,7 @@ public:
     auto us = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - t0).count();
     if (us >= 8) {
-      g_compile_stall_stats.num_stalls++;
+      // g_compile_stall_stats.num_stalls++;
       g_compile_stall_stats.total_time_stalled += us;
       Logger::info(str::format("Time taken to load (Tesselation): ", us));
     }

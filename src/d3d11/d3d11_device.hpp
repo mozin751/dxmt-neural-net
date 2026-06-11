@@ -63,6 +63,8 @@ public:
   virtual unsigned int GetDirectXVersion() = 0;
 
   d3d11_device_mutex mutex;
+
+  uint64_t num_stalls = 0;
 };
 
 Com<IMTLDXGIDevice> CreateD3D11Device(std::unique_ptr<Device> &&device,

@@ -318,6 +318,7 @@ format_desc(const MTL_GRAPHICS_PIPELINE_DESC &d) {
   s += " GS=" + std::to_string(reinterpret_cast<uintptr_t>(d.GeometryShader));
   return s;
 }
+
 // Walks the PS output signature (OSGN) and returns:
 //   - count: highest SV_Target slot index + 1 (0 if none)
 //   - classes[i]: float/uint/sint class the PS writes to slot i, None if unused
@@ -1235,14 +1236,12 @@ std::vector<Prediction> predictor_ps_rps_blend_history(
 
     if (!ps) return predictions;
 
-    // Look up this PS's historical (RPS, blend) pairs.
     auto ps_it = ps_rps_blend_table.find(ps->sha1());
     if (ps_it == ps_rps_blend_table.end())
-        return predictions;  // never seen this PS before — emit nothing
+        return predictions;
 
     const auto& rps_blend_map = ps_it->second;
 
-    // Rank by frequency, take top-k.
     std::vector<std::pair<uint32_t, std::pair<RenderPassSignature, IMTLD3D11BlendState*>>> ranked;
     ranked.reserve(rps_blend_map.size());
     for (const auto& [key, count] : rps_blend_map)
@@ -1252,7 +1251,6 @@ std::vector<Prediction> predictor_ps_rps_blend_history(
 
     uint32_t limit = std::min(top_k, (uint32_t)ranked.size());
 
-    // VS-compatible input layouts.
     std::vector<InputLayout*> valid_ils;
     auto vs_sig = HashVSInputRequirement(vs->vs_input_req);
     auto il_it = input_req_to_layouts.find(vs_sig);
@@ -1275,8 +1273,7 @@ std::vector<Prediction> predictor_ps_rps_blend_history(
         const auto& [rps, blend] = ranked[i].second;
 
         for (auto* il : valid_ils) {
-            for (auto ibf : {SM50_INDEX_BUFFER_FORMAT_NONE,
-                             SM50_INDEX_BUFFER_FORMAT_UINT16}) {
+            for (auto ibf : {SM50_INDEX_BUFFER_FORMAT_UINT16}) {
 
                 MTL_GRAPHICS_PIPELINE_DESC desc{};
                 desc.VertexShader   = vs;
@@ -1307,7 +1304,7 @@ std::vector<Prediction> predictor_ps_rps_blend_history(
                     predictions.push_back(pred);
                     previous_predictions.insert(pred);
                     // Logger::info(str::format("PREDICTED: ", format_desc(pred.pDesc)));
-                }
+    }
             }
         }
     }
@@ -1678,7 +1675,6 @@ std::vector<Prediction> predictor_nn_rps_blend_v2(
 
     // Step 5 — emit predictions
     static constexpr SM50_INDEX_BUFFER_FORAMT kIBFs[] = {
-        SM50_INDEX_BUFFER_FORMAT_NONE,
         SM50_INDEX_BUFFER_FORMAT_UINT16,
     };
 
