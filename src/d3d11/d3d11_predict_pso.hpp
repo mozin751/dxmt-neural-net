@@ -1594,8 +1594,9 @@ std::vector<Prediction> predictor_nn_rps_blend_v2(
         }
     }
 
-    *found_similar = best_sim >= sim_threshold;
-    if (!(*found_similar))
+    bool dummy = best_sim >= sim_threshold && ps_rps_blend_table.count(best_sha1) > 0.0f;
+    if (found_similar) *found_similar = dummy;
+    if (!dummy)
       return predictions;
 
     uint8_t  nca    = ps->ps_outs.count;
@@ -1843,5 +1844,42 @@ std::vector<Prediction> predictor_composed_nn_and_global(
         
   }
 }
+
+std::vector<Prediction> solution_predictor(
+    ManagedShader vs,
+    ManagedShader ps,
+    const std::unordered_map<Sha1Digest,
+        std::unordered_map<std::pair<RenderPassSignature, IMTLD3D11BlendState*>, uint32_t,
+            PairHash<RenderPassSignature, IMTLD3D11BlendState*>>>& ps_rps_blend_table,
+    const std::unordered_map<RenderPassSignature,
+        std::unordered_map<IMTLD3D11BlendState*, uint32_t>>& rps_blend_table,
+    const std::unordered_map<Sha1Digest, MinHashSig>& ps_minhash,
+    std::unordered_map<Sha1Digest, std::unordered_set<Sha1Digest>>& input_req_to_layouts,
+    std::unordered_map<Sha1Digest, InputLayout*>& layout_by_sha1,
+    std::unordered_set<Prediction>& previous_predictions,
+    const std::unordered_map<IMTLD3D11BlendState*, uint8_t>& blend_min_ps_outs) {
+      if (!ps) return {};
+
+    bool ps_known = ps_rps_blend_table.count(ps->sha1()) > 0;
+
+    if (ps_known) {
+        return predictor_ps_rps_blend_history(
+            vs, ps,
+            ps_rps_blend_table,
+            input_req_to_layouts, layout_by_sha1,
+            previous_predictions, 3);
+    } else {
+        bool dummy;
+        return predictor_nn_rps_blend_v2(
+            vs, ps,
+            ps_minhash,
+            ps_rps_blend_table,
+            rps_blend_table,
+            input_req_to_layouts, layout_by_sha1,
+            previous_predictions,
+            blend_min_ps_outs,
+            &dummy, 0.25, 1);
+      }
+    }
 
 } // namespace dxmt

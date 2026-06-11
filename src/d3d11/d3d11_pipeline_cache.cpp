@@ -356,7 +356,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       for (const auto& ps_name: vs_to_ps_map_[vs_name]) {
         if (ps_name.has_value() && pixel_shaders_.count(ps_name.value()) == 0) continue;
         ManagedShader ps = ps_name.has_value() ? shaders_[pixel_shaders_[ps_name.value()]].get() : nullptr;
-        auto predictions =  predictor_composed_nearest_neighbour(
+        auto predictions =  solution_predictor(
           managed_shader, ps,
           ps_rps_blend_table_,
           rps_blend_table_,
@@ -364,8 +364,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
           input_requirement_to_layouts_,
           layout_by_sha1_,
           previous_predictions_,
-          blend_min_ps_outs_,
-          /*top_k=*/5);
+          blend_min_ps_outs_);
         // Logger::info(str::format("Is default blend desc nullptr? ", blend_states.cache[kDefaultBlendDesc].get() == nullptr));
 
         for (auto prediction: predictions) {
@@ -408,7 +407,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       for (const auto& vs_name: ps_to_vs_map_[ps_name]) {
         if (vertex_shaders_.count(vs_name) == 0) continue;
         ManagedShader vs = shaders_[vertex_shaders_[vs_name]].get();
-        auto predictions =  predictor_composed_nearest_neighbour(
+        auto predictions =  solution_predictor(
           vs, managed_shader,
           ps_rps_blend_table_,
           rps_blend_table_,
@@ -416,8 +415,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
           input_requirement_to_layouts_,
           layout_by_sha1_,
           previous_predictions_,
-          blend_min_ps_outs_,
-          /*top_k=*/5);
+          blend_min_ps_outs_);
         // Logger::info(str::format("Is default blend desc nullptr? ", blend_states.cache[kDefaultBlendDesc].get() == nullptr));
         
         for (auto prediction: predictions) {
@@ -517,7 +515,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
         for (const auto& ps_name: vs_to_ps_map_[vs_name]) {
           if (ps_name.has_value() && pixel_shaders_.count(ps_name.value()) == 0) continue;
           ManagedShader ps = ps_name.has_value() ? shaders_[pixel_shaders_[ps_name.value()]].get() : nullptr;
-          auto predictions =  predictor_composed_nearest_neighbour(
+          auto predictions =  solution_predictor(
             shaders_[vertex_shaders_[vs_name]].get(), ps,
             ps_rps_blend_table_,
             rps_blend_table_,
@@ -525,8 +523,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
             input_requirement_to_layouts_,
             layout_by_sha1_,
             previous_predictions_,
-            blend_min_ps_outs_,
-            /*top_k=*/5);
+            blend_min_ps_outs_);
 
           for (auto prediction: predictions) {
             MTLCompiledGraphicsPipeline *dummyPipeline;
@@ -627,6 +624,19 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
           for (uint8_t i = 0; i < desc.NumColorAttachments; i++)
               caf_freq_table_[i][desc.ColorAttachmentFormats[i]]++; 
         }
+        
+        // Add vs/ps pairs
+        auto vs_name = pDesc->VertexShader->sha1().string().substr(0, 8);
+        std::string ps_name = kDefaultPSName;
+        if (pDesc->PixelShader) {
+          ps_name = pDesc->PixelShader->sha1().string().substr(0, 8);
+          if (ps_to_vs_map_[ps_name].count(vs_name) == 0) Logger::info(str::format("Adding pair: ", vs_name, "/", ps_name));
+          ps_to_vs_map_[ps_name].insert(vs_name);
+        }
+        if (vs_to_ps_map_[vs_name].count(ps_name == kDefaultPSName ? std::nullopt : std::optional<std::string>(ps_name)) == 0) Logger::info(str::format("Adding pair: ", vs_name, "/", ps_name));
+        vs_to_ps_map_[vs_name].insert(pDesc->PixelShader ? std::optional<std::string>(ps_name) : std::nullopt);
+        descriptor_shader_map_[str::format(vs_name, "/", ps_name)].insert(*pDesc);
+        dirty_maps_ = true;
       }
       return;
     }
@@ -672,10 +682,9 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       ibf_freq_table_[pDesc->IndexBufferFormat]++;
       for (uint8_t i = 0; i < pDesc->NumColorAttachments; i++)
           caf_freq_table_[i][pDesc->ColorAttachmentFormats[i]]++; 
-    }
 
-    // Add vs/ps pairs
-    if (!fromCache) {
+
+      // Add vs/ps pairs
       auto vs_name = pDesc->VertexShader->sha1().string().substr(0, 8);
       std::string ps_name = kDefaultPSName;
       if (pDesc->PixelShader) {
@@ -688,6 +697,21 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       descriptor_shader_map_[str::format(vs_name, "/", ps_name)].insert(*pDesc);
       dirty_maps_ = true;
     }
+
+    // Add vs/ps pairs
+    // if (!fromCache) {
+    //   auto vs_name = pDesc->VertexShader->sha1().string().substr(0, 8);
+    //   std::string ps_name = kDefaultPSName;
+    //   if (pDesc->PixelShader) {
+    //     ps_name = pDesc->PixelShader->sha1().string().substr(0, 8);
+    //     if (ps_to_vs_map_[ps_name].count(vs_name) == 0) Logger::info(str::format("Adding pair: ", vs_name, "/", ps_name));
+    //     ps_to_vs_map_[ps_name].insert(vs_name);
+    //   }
+    //   if (vs_to_ps_map_[vs_name].count(ps_name == kDefaultPSName ? std::nullopt : std::optional<std::string>(ps_name)) == 0) Logger::info(str::format("Adding pair: ", vs_name, "/", ps_name));
+    //   vs_to_ps_map_[vs_name].insert(pDesc->PixelShader ? std::optional<std::string>(ps_name) : std::nullopt);
+    //   descriptor_shader_map_[str::format(vs_name, "/", ps_name)].insert(*pDesc);
+    //   dirty_maps_ = true;
+    // }
 
     auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc, pso_cache_, pso_cache_mutex_)});
     if (!inserted) {
@@ -753,11 +777,15 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 
   void save_cache(std::unordered_map<size_t, WMT::Reference<WMT::BinaryArchive>>& cache, const std::string& path) {
     std::unordered_set<size_t> unhit_hashes;
+    int misses = 0;
     for (const auto& pred : previous_predictions_) {
         if (!pred.hit) {
+            ++misses;
             unhit_hashes.insert(std::hash<MTL_GRAPHICS_PIPELINE_DESC>{}(pred.pDesc));
         }
     }
+
+    Logger::info(str::format(("Misses (from save_cache): ", misses)));
 
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f) return;
@@ -1227,6 +1255,13 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
           }
           write_pod(f, min_count);
       }
+
+      // --- ps_minhash_ ---
+      write_pod(f, (uint32_t)ps_minhash_.size());
+      for (const auto& [sha1, sig] : ps_minhash_) {
+          write_pod(f, sha1);
+          write_pod(f, sig);
+      }
   }
 
   void loadPredictorState(const std::string& path) {
@@ -1317,6 +1352,17 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
                   it->second = std::min(it->second, min_count);
           }
       }
+
+      // --- ps_minhash_ ---
+      // uint32_t minhash_count = 0;
+      // if (!read_pod(f, minhash_count)) return;
+      // for (uint32_t i = 0; i < minhash_count; i++) {
+      //     Sha1Digest sha1;
+      //     if (!read_pod(f, sha1)) return;
+      //     MinHashSig sig;
+      //     if (!read_pod(f, sig)) return;
+      //     ps_minhash_[sha1] = sig;
+      // }
   }
 
   public:
@@ -1346,11 +1392,11 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       save_cache(pso_cache_, WMT::GetCacheDir() + "cache_map.bin");
     // }
 
-    if (dirty_maps_) {
+    // if (dirty_maps_) {
       writeShaderPairMap(vs_to_ps_map_, WMT::GetCacheDir() + "vs_to_ps_map.bin");
       writeShaderPairMap(ps_to_vs_map_, WMT::GetCacheDir() + "ps_to_vs_map.bin");
       writeCacheToDisk(WMT::GetCacheDir() + "shader_descriptor_map.bin");
-    }
+    // }
     savePredictorState(WMT::GetCacheDir() + "predictor_state.bin");
 
     Logger::info(str::format("Num predictions: ", previous_predictions_.size()));
